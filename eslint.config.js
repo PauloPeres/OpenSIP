@@ -23,11 +23,28 @@ export default tseslint.config(
     }
   },
   {
+    // TypeScript already resolves every identifier; no-undef only duplicates it
+    // and cannot see DOM or Node globals through the compiler's lib settings.
+    files: ['**/*.{ts,tsx}'],
+    rules: { 'no-undef': 'off' }
+  },
+  {
     files: ['tests/**/*.ts', 'scripts/**/*.mjs', '*.config.ts', 'cucumber.cjs'],
+    languageOptions: {
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        module: 'writable',
+        require: 'readonly',
+        __dirname: 'readonly',
+        URL: 'readonly'
+      }
+    },
     rules: {
       'max-lines-per-function': 'off',
       '@typescript-eslint/explicit-function-return-type': 'off',
-      'no-console': 'off'
+      'no-console': 'off',
+      complexity: 'off'
     }
   }
 );
