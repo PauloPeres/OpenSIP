@@ -16,7 +16,7 @@ date we cannot defend is worse than none.
 ordering, message framing, digest responses, jitter-buffer policy, codec maths: all of it
 is plain code with no Electron, no DOM and no sockets. `src/main` only owns the things
 that cannot be pure (sockets, DNS, the audio device) and feeds events into the core. That
-is why the protocol can be tested exhaustively without a PBX: 912 unit tests and 21
+is why the protocol can be tested exhaustively without a PBX: 914 unit tests and 21
 Gherkin scenarios, at 100% statement coverage of the core.
 
 Every phase below is planned the same way: put the decisions in `src/core` first, write
@@ -36,28 +36,49 @@ agrees with it. The blocker below is exactly the kind of thing a green suite can
 | Per-account on/off switching | **Working**, verified live |
 | Diagnostics log that redacts credentials | **Working** |
 | Two-way RTP audio: G.711 µ-law and A-law, jitter buffer, DTMF (RFC 4733), mute, hold and resume | **Implemented, not verified end to end.** Unit-tested; a UDP loopback test carried audio both ways with zero loss; **no real call has been heard yet** |
-| Outbound call to an internal extension | Gets responses and rings |
-| Outbound call to an external number | **Blocked — see below** |
+| Outbound call to an internal extension | The extension rings, but the caller saw only `100 Trying` (same cause as below); awaiting live confirmation |
+| Outbound call to an external number | **Fix shipped, awaiting live confirmation — see below** |
 | Published release | **None yet** |
 | macOS signing | Ad-hoc signed, not Developer ID: the keychain prompts on each build and Gatekeeper warns on download |
 | macOS 26 icon | Restyled by the system, because the app does not ship the new Icon Composer format |
 
-#### The open blocker
+#### The outbound-call blocker: cause found and fixed, not yet confirmed live
 
-An outbound call to an external number never completes. The INVITE is sent, the server
-answers `100 Trying`, and then nothing at all arrives: no `180`, no `183`, no error, no
-final response. Calls to an internal extension do get responses and do ring.
+Outbound calls never completed. The INVITE was sent, the server answered `100 Trying`,
+and then nothing at all arrived: no `180`, no `183`, no error, no final response. This
+affected an external number and an internal extension alike.
 
-What we know:
+**The cause was in the client, not the server.** The UDP socket was created with
+`socket.connect(port, host)`. A connected datagram socket makes the kernel drop every
+packet whose source does not exactly match the connected peer. SIP over UDP breaks that
+assumption routinely: a proxy commonly sends later responses from a different port,
+listener or interface than the one that received the request, and RFC 3261 matches a
+response to its transaction by the Via branch precisely because the source address can
+legitimately differ. The proxy's own `100 Trying` arrived; the relayed `180` and `200`
+were discarded by the operating system before our code saw them. Registration and
+inbound calls were unaffected, because those arrive at the bound port regardless.
 
+The decisive evidence: across every captured trace, no outbound INVITE ever received any
+response other than `100`, whether for an external number or for an internal extension
+that demonstrably rings. A dialplan fault would not behave identically for both. The
+roadmap previously said the evidence pointed at the server's dialplan or outbound trunk;
+that was wrong.
+
+The fix is in `src/main/sip/connection.ts`: the socket is bound and used with an explicit
+destination, and accepts datagrams from any source.
+
+What is and is not established:
+
+- **Proven by unit tests** against a socket fake that mimics the kernel's filtering of a
+  connected socket: the old behaviour loses the later responses, the new behaviour
+  receives them.
+- **Not yet verified against the real server.** That needs a call placed by the owner. Until
+  then we cannot claim the MVP works, and it remains possible that the server has a
+  second, independent problem that the lost responses were hiding.
 - `+5555500000396` is rejected outright with `484 Address Incomplete`, so E.164 with a
-  leading plus is the wrong form for this server.
-- The plain, 0-prefixed and 55-prefixed forms all behave identically: `100 Trying`, then
-  silence.
-- A 90-second call-setup guard now cancels the call and reports it, instead of spinning
+  leading plus is the wrong form for this server. This finding stands.
+- A 90-second call-setup guard cancels the call and reports it, instead of spinning
   forever.
-- The evidence points at the server's dialplan or outbound trunk rather than the client,
-  **but this is not settled.** Until it is, we cannot claim the MVP works.
 
 The MVP is done when, and only when:
 
@@ -67,10 +88,9 @@ The MVP is done when, and only when:
 3. Two accounts are registered and in use at once, with a call on each.
 4. A first release is published.
 
-Items 1 and 2 are what turn "implemented" into "verified" for the audio path. The blocker
-may turn out to be configuration on the server and not a code change at all; if so, the
-fix is documentation (what a server needs for outbound dialling to work) plus whatever the
-client can do to make a silent failure visible sooner.
+Items 1 and 2 are what turn "implemented" into "verified" for the audio path. Item 1 is
+also the live confirmation of the socket fix above; if that call still fails, the next
+step is a fresh trace, not an assumption about the server.
 
 Until the MVP is done, the four phases below are **ordered but not started.** They depend
 on a working call path: history records calls, contacts identify and place them,
@@ -282,7 +302,7 @@ plan.
 
 | Decision | Why it is open | What it blocks |
 | --- | --- | --- |
-| **The outbound-call blocker** | An external number gets `100 Trying` and then silence. Evidence points at the server's dialplan or outbound trunk rather than the client; not yet settled. `+` E.164 is rejected with `484`. | The MVP, and therefore everything after it. |
+| **The outbound-call blocker** | Fix shipped, awaiting live confirmation. The cause was a connected UDP socket that made the kernel drop responses arriving from a different source than the server address we sent to; proven by unit tests, not yet by a real call. `+` E.164 is rejected with `484`. | The MVP, and therefore everything after it, until a real outbound call completes. |
 | **Apple Developer ID certificate** | The macOS build is ad-hoc signed: the keychain asks for permission on each build and Gatekeeper warns on download. Signing and notarising needs a paid Apple Developer account. | A credible macOS release; also reliable TCC permissions for Contacts and the microphone. |
 | **macOS 26 icon format** | The app does not ship the new Icon Composer format, so macOS 26 restyles the icon. | Cosmetic only; can wait. |
 | **Recording consent model** | Audible notice, per-call consent, visible indicator, or a combination; and what "record all" means under it. | Phase 3. |
@@ -306,7 +326,7 @@ transporte, enquadramento de mensagens, resposta digest, política do jitter buf
 matemática de codecs: tudo é código simples, sem Electron, sem DOM e sem sockets. O
 `src/main` cuida só do que não pode ser puro (sockets, DNS, o dispositivo de áudio) e
 alimenta o núcleo com eventos. É por isso que o protocolo pode ser testado
-exaustivamente sem nenhum PBX: 912 testes unitários e 21 cenários Gherkin, com 100% de
+exaustivamente sem nenhum PBX: 914 testes unitários e 21 cenários Gherkin, com 100% de
 cobertura de comandos do núcleo.
 
 Todas as fases abaixo são planejadas do mesmo jeito: primeiro as decisões em `src/core`,
@@ -327,30 +347,50 @@ verde não mostra.
 | Liga/desliga por conta | **Funcionando**, verificado ao vivo |
 | Log de diagnóstico que oculta credenciais | **Funcionando** |
 | Áudio RTP bidirecional: G.711 µ-law e A-law, jitter buffer, DTMF (RFC 4733), mudo, espera e retomada | **Implementado, não verificado de ponta a ponta.** Testado por unidade; um teste de loopback UDP levou áudio nos dois sentidos sem perda; **nenhuma chamada real foi ouvida ainda** |
-| Chamada de saída para um ramal interno | Recebe respostas e toca |
-| Chamada de saída para um número externo | **Bloqueada — veja abaixo** |
+| Chamada de saída para um ramal interno | O ramal toca, mas quem ligou viu apenas `100 Trying` (mesma causa descrita abaixo); aguardando confirmação ao vivo |
+| Chamada de saída para um número externo | **Correção entregue, aguardando confirmação ao vivo — veja abaixo** |
 | Release publicada | **Nenhuma ainda** |
 | Assinatura no macOS | Assinada ad-hoc, não com Developer ID: o chaveiro pergunta a cada build e o Gatekeeper avisa no download |
 | Ícone no macOS 26 | Reestilizado pelo sistema, porque o app não traz o novo formato do Icon Composer |
 
-#### O bloqueio em aberto
+#### O bloqueio da chamada de saída: causa encontrada e corrigida, ainda não confirmada ao vivo
 
-Uma chamada de saída para um número externo nunca se completa. O INVITE é enviado, o
-servidor responde `100 Trying` e depois não chega absolutamente nada: nem `180`, nem
-`183`, nem erro, nem resposta final. Chamadas para um ramal interno recebem respostas e
-tocam.
+As chamadas de saída nunca se completavam. O INVITE era enviado, o servidor respondia
+`100 Trying` e depois não chegava absolutamente nada: nem `180`, nem `183`, nem erro, nem
+resposta final. Isso valia tanto para um número externo quanto para um ramal interno.
 
-O que sabemos:
+**A causa estava no cliente, não no servidor.** O socket UDP era criado com
+`socket.connect(port, host)`. Um socket de datagramas conectado faz o kernel descartar
+todo pacote cuja origem não seja exatamente o par conectado. O SIP sobre UDP quebra essa
+suposição com frequência: um proxy costuma enviar as respostas seguintes de outra porta,
+outro listener ou outra interface, diferentes daqueles que receberam a requisição, e a
+RFC 3261 associa a resposta à transação pelo branch do Via justamente porque o endereço de
+origem pode legitimamente mudar. O `100 Trying` do próprio proxy chegava; os `180` e `200`
+retransmitidos eram descartados pelo sistema operacional antes de o nosso código vê-los. O
+registro e as chamadas recebidas não eram afetados, porque chegam à porta vinculada de
+qualquer jeito.
 
+A evidência decisiva: em todos os traces capturados, nenhum INVITE de saída recebeu
+qualquer resposta além de `100`, fosse para um número externo ou para um ramal interno
+que comprovadamente toca. Uma falha de plano de discagem não se comportaria de forma
+idêntica nos dois casos. O plano de evolução dizia antes que a evidência apontava para o
+plano de discagem ou o tronco de saída do servidor; isso estava errado.
+
+A correção está em `src/main/sip/connection.ts`: o socket é vinculado (`bind`) e usado com
+destino explícito, e aceita datagramas de qualquer origem.
+
+O que está e o que não está estabelecido:
+
+- **Provado por testes unitários** contra um socket falso que imita a filtragem do kernel
+  em um socket conectado: o comportamento antigo perde as respostas seguintes, o novo as
+  recebe.
+- **Ainda não verificado contra o servidor real.** Isso exige uma chamada feita pelo dono.
+  Até lá, não podemos afirmar que o MVP funciona, e continua possível que o servidor tenha
+  um segundo problema, independente, que as respostas perdidas estavam escondendo.
 - `+5555500000396` é rejeitado de imediato com `484 Address Incomplete`; portanto, E.164
-  com o sinal de mais é a forma errada para este servidor.
-- As formas simples, com prefixo 0 e com prefixo 55 se comportam todas do mesmo jeito:
-  `100 Trying` e depois silêncio.
-- Uma proteção de 90 segundos na montagem da chamada agora a cancela e avisa, em vez de
-  ficar girando para sempre.
-- A evidência aponta para o plano de discagem ou o tronco de saída do servidor, e não para
-  o cliente, **mas isso não está resolvido.** Até que esteja, não podemos afirmar que o MVP
-  funciona.
+  com o sinal de mais é a forma errada para este servidor. Esta conclusão se mantém.
+- Uma proteção de 90 segundos na montagem da chamada a cancela e avisa, em vez de ficar
+  girando para sempre.
 
 O MVP está pronto quando, e somente quando:
 
@@ -361,10 +401,8 @@ O MVP está pronto quando, e somente quando:
 4. Uma primeira release é publicada.
 
 Os itens 1 e 2 são o que transforma "implementado" em "verificado" para o caminho de
-áudio. O bloqueio pode ser configuração do servidor e nem exigir mudança de código; se for
-o caso, a correção é documentação (o que um servidor precisa para a discagem de saída
-funcionar) mais o que o cliente puder fazer para tornar uma falha silenciosa visível mais
-cedo.
+áudio. O item 1 é também a confirmação ao vivo da correção do socket acima; se essa
+chamada ainda falhar, o próximo passo é um novo trace, não uma suposição sobre o servidor.
 
 Enquanto o MVP não estiver pronto, as quatro fases abaixo estão **ordenadas, mas não
 iniciadas.** Elas dependem de um caminho de chamada funcionando: o histórico registra
@@ -590,7 +628,7 @@ plano.
 
 | Decisão | Por que está em aberto | O que bloqueia |
 | --- | --- | --- |
-| **O bloqueio da chamada de saída** | Um número externo recebe `100 Trying` e depois silêncio. A evidência aponta para o plano de discagem ou o tronco de saída do servidor, e não para o cliente; ainda não está resolvido. E.164 com `+` é rejeitado com `484`. | O MVP e, portanto, tudo o que vem depois. |
+| **O bloqueio da chamada de saída** | Correção entregue, aguardando confirmação ao vivo. A causa era um socket UDP conectado, que fazia o kernel descartar respostas vindas de origem diferente do endereço do servidor para o qual enviamos; provado por testes unitários, ainda não por uma chamada real. E.164 com `+` é rejeitado com `484`. | O MVP e, portanto, tudo o que vem depois, até que uma chamada de saída real se complete. |
 | **Certificado Developer ID da Apple** | O build do macOS é assinado ad-hoc: o chaveiro pede permissão a cada build e o Gatekeeper avisa no download. Assinar e notarizar exige uma conta paga de desenvolvedor Apple. | Uma release crível para macOS; também permissões TCC confiáveis para Contatos e microfone. |
 | **Formato do ícone no macOS 26** | O app não traz o novo formato do Icon Composer, então o macOS 26 reestiliza o ícone. | Apenas estético; pode esperar. |
 | **Modelo de consentimento da gravação** | Aviso sonoro, consentimento por chamada, indicador visível ou uma combinação; e o que "gravar todas" significa sob ele. | Fase 3. |

@@ -102,9 +102,12 @@ src/core/      pure, framework-free domain — no Electron, no DOM, 100% unit te
   i18n/        translator + en/pt-BR dictionaries
   sip/         account validation, account store, registration and call state
                machines, transport discovery, SIP wire codec and digest auth
+  rtp/         G.711 codecs, RTP packets, jitter buffer
+  diagnostics/ diagnostics log and credential redaction
   config/      development account seeding from the environment
 src/main/      Electron main process: windows, IPC, storage, auto-update
-  sip/         native SIP stack: transport prober, sockets, REGISTER transactions
+  sip/         native SIP stack: transport prober, sockets, registration and calls
+  media/       RTP session and the hidden audio window (microphone and speaker)
 src/preload/   contextBridge surface — the only path between renderer and main
 src/renderer/  React UI; every string goes through t()
 src/shared/    the IPC contract shared by all three processes
@@ -123,10 +126,20 @@ which is why the whole protocol can be tested exhaustively without a PBX.
 | Automatic transport discovery (SRV + probe) | working |
 | Registration over TCP, TLS, UDP, WS, WSS | working |
 | Incoming call signalling: ring, answer, reject, hang up | working |
-| **Two-way audio (RTP/G.711)** | **not yet — next milestone** |
+| Placing calls: dialer, one line per call | implemented, unconfirmed against a live server |
+| Per-account on/off switch | working |
+| Diagnostics log with credential redaction | working |
+| Onboarding: microphone and notification permissions, first account | working |
+| **Two-way audio (RTP/G.711)** | **implemented, unverified — no real call heard yet** |
 
-Answering a call currently completes the SIP signalling only. The RTP media path is
-the next milestone and is tracked openly rather than implied.
+The audio path is built and tested in isolation: `src/core/rtp` (G.711 µ-law and A-law,
+RFC 3550 packets, a jitter buffer) and `src/main/media` (the RTP session and the hidden
+audio window) are unit-tested, and a UDP loopback test carried audio both ways with zero
+loss. But no real call has been heard, so it is neither "done" nor "missing": it stays
+unverified until a person is heard on a real call. Outbound calls had a separate defect
+(a connected UDP socket made the kernel drop the server's later responses); it is fixed
+and covered by unit tests, but not yet confirmed against a real server. Both are tracked
+in the [roadmap](ROADMAP.md).
 
 What comes after that, in order, is in the [roadmap](ROADMAP.md).
 

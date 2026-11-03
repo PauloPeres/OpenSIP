@@ -107,10 +107,13 @@ src/core/      domínio puro, sem framework — sem Electron, sem DOM, 100% test
   sip/         validação de conta, repositório de contas, máquinas de estado de
                registro e de chamada, descoberta de transporte, codec SIP e
                autenticação digest
+  rtp/         codecs G.711, pacotes RTP, jitter buffer
+  diagnostics/ log de diagnóstico e ocultação de credenciais
   config/      carga de contas de desenvolvimento a partir do ambiente
 src/main/      processo principal do Electron: janelas, IPC, armazenamento,
                atualização automática
-  sip/         pilha SIP nativa: sonda de transporte, sockets, transações REGISTER
+  sip/         pilha SIP nativa: sonda de transporte, sockets, registro e chamadas
+  media/       sessão RTP e a janela de áudio oculta (microfone e alto-falante)
 src/preload/   superfície do contextBridge — o único caminho entre renderer e main
 src/renderer/  UI em React; todo texto passa por t()
 src/shared/    o contrato de IPC compartilhado pelos três processos
@@ -129,10 +132,21 @@ do núcleo — e é por isso que o protocolo inteiro pode ser testado sem nenhum
 | Descoberta automática de transporte (SRV + sonda) | funcionando |
 | Registro sobre TCP, TLS, UDP, WS, WSS | funcionando |
 | Sinalização de chamada recebida: tocar, atender, rejeitar, encerrar | funcionando |
-| **Áudio bidirecional (RTP/G.711)** | **ainda não — próximo marco** |
+| Fazer chamadas: discador, uma linha por chamada | implementado, não confirmado contra um servidor real |
+| Liga/desliga por conta | funcionando |
+| Log de diagnóstico com ocultação de credenciais | funcionando |
+| Primeiros passos: permissões de microfone e notificações, primeira conta | funcionando |
+| **Áudio bidirecional (RTP/G.711)** | **implementado, não verificado — nenhuma chamada real ouvida ainda** |
 
-Atender uma chamada hoje conclui apenas a sinalização SIP. O caminho de mídia RTP é o
-próximo marco, e está declarado abertamente em vez de insinuado.
+O caminho de áudio está construído e testado de forma isolada: `src/core/rtp` (G.711
+µ-law e A-law, pacotes RFC 3550, jitter buffer) e `src/main/media` (a sessão RTP e a
+janela de áudio oculta) têm testes unitários, e um teste de loopback UDP levou áudio nos
+dois sentidos sem perda. Mas nenhuma chamada real foi ouvida; por isso ele não está nem
+"pronto" nem "ausente": continua não verificado até que uma pessoa seja ouvida em uma
+chamada real. As chamadas de saída tinham um defeito à parte (um socket UDP conectado
+fazia o kernel descartar as respostas seguintes do servidor); ele está corrigido e coberto
+por testes unitários, mas ainda não confirmado contra um servidor real. Ambos estão no
+[plano de evolução](ROADMAP.md#português).
 
 O que vem depois, em ordem, está no [plano de evolução](ROADMAP.md#português).
 

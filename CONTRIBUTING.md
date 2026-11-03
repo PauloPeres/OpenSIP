@@ -20,8 +20,9 @@
   through `t('some.key')`, and both `src/core/i18n/locales/en.json` and `pt-BR.json`
   are updated in the same commit. Domain validation returns i18n *keys*, never prose.
 - **Pure domain.** New state transitions belong in `src/core` as pure functions.
-  `src/main/sip-engine.ts` is an adapter: it may translate sip.js events into core
-  events and nothing else.
+  `src/main/sip/engine.ts` drives discovery, registration, INVITE handling and media,
+  but delegates every state transition to the pure reducers in `@core/sip`; `src/main`
+  only performs I/O.
 - **Small functions.** 20 lines maximum, cyclomatic complexity 8 maximum, nesting
   depth 3 maximum. Prefer a lookup table over a `switch`: a table has complexity 1 and
   costs nothing in CRAP.
@@ -76,8 +77,9 @@ runs mutation testing and builds on Linux, macOS and Windows.
   são atualizados no mesmo commit. A validação de domínio devolve *chaves* de i18n,
   nunca frases.
 - **Domínio puro.** Novas transições de estado vivem em `src/core`, como funções
-  puras. O `src/main/sip-engine.ts` é um adaptador: pode traduzir eventos do sip.js em
-  eventos do domínio e nada mais.
+  puras. O `src/main/sip/engine.ts` conduz a descoberta, o registro, o tratamento de
+  INVITE e a mídia, mas delega toda transição de estado aos redutores puros de
+  `@core/sip`; o `src/main` apenas faz I/O.
 - **Funções pequenas.** No máximo 20 linhas, complexidade ciclomática 8 e profundidade
   de aninhamento 3. Prefira tabela de consulta a `switch`: a tabela tem complexidade 1
   e não custa nada no CRAP.
