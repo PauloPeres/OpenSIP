@@ -2,6 +2,7 @@ import { memo } from 'react';
 import type { TranslationApi } from '../i18n/TranslatorProvider';
 import { formatClock } from '../state/format';
 import type { LogEntry } from '../state/useLogView';
+import { Breakable } from './ui/Breakable';
 import { cx } from './ui/cx';
 
 interface LogRowProps {
@@ -26,7 +27,7 @@ function LogRowView({ entry, accountName, t }: LogRowProps): JSX.Element {
       <time className="log-time" dateTime={new Date(entry.at).toISOString()}>{formatClock(entry.at)}</time>
       <span className={loud ? 'log-level' : 'sr-only'}>{t(`logs.level.${entry.level}`)}</span>
       <span className="log-message">
-        {t(entry.messageKey, entry.params)}
+        <Breakable text={t(entry.messageKey, entry.params)} />
         {accountName === '' ? null : <span className="log-account">{accountName}</span>}
         {entry.raw === undefined ? null : <RawBlock raw={entry.raw} label={t('logs.raw')} />}
       </span>

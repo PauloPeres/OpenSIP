@@ -15,15 +15,15 @@ export function PermBadge({ state }: { readonly state: PermState }): JSX.Element
   return <Badge tone={state} label={t(LABEL_KEY[state])} />;
 }
 
-/** macOS will not prompt again after a denial, so the way out is spelled out and one click away. */
-/** `settings` adds the button that opens the OS pane; only the microphone pane is wired, so only it asks for it. */
-export function DeniedHint({ state, settings = false }: { readonly state: PermState; readonly settings?: boolean }): JSX.Element | null {
+/** macOS will not prompt again after a denial, so the way out is spelled out here and offered by `SettingsAction`. */
+export function DeniedHint({ state }: { readonly state: PermState }): JSX.Element | null {
   const { t } = useTranslation();
-  if (state !== 'denied') return null;
-  return (
-    <>
-      <p className="hint">{t('onboarding.deniedHint')}</p>
-      {settings ? <Button label={t('onboarding.reopen')} onClick={() => void getApi().openSystemSettings()} /> : null}
-    </>
-  );
+  return state === 'denied' ? <p className="hint">{t('onboarding.deniedHint')}</p> : null;
+}
+
+/** Opens the OS pane after a denial; only the microphone pane is wired, so only it asks for this. */
+export function SettingsAction({ state, settings }: { readonly state: PermState; readonly settings: boolean }): JSX.Element | null {
+  const { t } = useTranslation();
+  if (state !== 'denied' || !settings) return null;
+  return <Button label={t('onboarding.reopen')} onClick={() => void getApi().openSystemSettings()} />;
 }

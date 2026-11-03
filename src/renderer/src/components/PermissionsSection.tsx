@@ -1,6 +1,6 @@
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { PermState, PermissionsModel } from '../state/permissions';
-import { DeniedHint, PermBadge } from './PermissionStatus';
+import { DeniedHint, PermBadge, SettingsAction } from './PermissionStatus';
 import { Button } from './ui/Button';
 
 interface RowProps {
@@ -17,7 +17,8 @@ function PermissionRow({ label, state, onAllow, settings = false }: RowProps): J
       <span className="perm-name">{label}</span>
       <PermBadge state={state} />
       {state === 'pending' ? <Button label={t('onboarding.allow')} onClick={() => void onAllow()} /> : null}
-      <DeniedHint state={state} settings={settings} />
+      <SettingsAction state={state} settings={settings} />
+      <DeniedHint state={state} />
     </li>
   );
 }

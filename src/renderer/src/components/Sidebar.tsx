@@ -31,7 +31,7 @@ function AccountStatus({ accounts }: { readonly accounts: readonly AccountView[]
         <li key={view.account.id} className="status-item">
           <Avatar name={view.account.displayName} hue={index} tone={displayState(view)} />
           <span className="status-text">
-            <span className="status-name">{view.account.displayName}</span>
+            <span className="status-name" title={view.account.displayName}>{view.account.displayName}</span>
             <span className={`status-state status-${displayState(view)}`}>{t(stateKey(view))}</span>
             <RegistrationNote registration={view.registration} failuresOnly />
           </span>

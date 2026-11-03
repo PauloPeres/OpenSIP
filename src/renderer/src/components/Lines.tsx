@@ -8,6 +8,7 @@ import type { AppActions } from '../state/useAppState';
 import { isIncomingRing } from '../state/useLines';
 import type { Line } from '../state/useLines';
 import { Avatar } from './ui/Badge';
+import { Breakable } from './ui/Breakable';
 import { Button } from './ui/Button';
 import { cx } from './ui/cx';
 import { Keypad } from './ui/Keypad';
@@ -85,7 +86,7 @@ function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv
     <>
       <Lamp state={call.state} />
       <span className="line-main">
-        <span className="line-name">{call.remoteIdentity}</span>
+        <Breakable className="line-name" text={call.remoteIdentity} titled />
         <Progress view={line.view} />
         <LineMeta line={line} env={env} />
       </span>

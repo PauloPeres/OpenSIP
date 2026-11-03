@@ -5,6 +5,7 @@ import { useTranslation } from '../i18n/TranslatorProvider';
 import { displayState, stateKey } from '../state/accountState';
 import { RegistrationNote } from './RegistrationNote';
 import { Avatar, Badge } from './ui/Badge';
+import { Breakable } from './ui/Breakable';
 import { Button } from './ui/Button';
 import { Switch } from './ui/Field';
 
@@ -62,7 +63,7 @@ function AccountIdentity({ view }: { readonly view: AccountView }): JSX.Element 
   return (
     <div className="account-id">
       <strong>{account.displayName}</strong>
-      <span className="mono muted">{account.uri}</span>
+      <Breakable className="mono muted" text={account.uri} titled />
       <RegistrationNote registration={registration} failuresOnly />
       {transport === undefined || !view.account.enabled ? null : (
         <span className="muted">{t('registration.transport', { transport: t(transportLabelKey(transport)) })}</span>

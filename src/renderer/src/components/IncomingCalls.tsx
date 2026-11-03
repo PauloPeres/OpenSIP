@@ -19,7 +19,7 @@ function Incoming({ line, accountName, onAnswer, onReject }: Omit<IncomingProps,
     <div className="incoming" role="alert">
       <span className="incoming-ring"><Icon name="phone" /></span>
       <div className="incoming-text">
-        <strong>{t('calls.incomingFrom', { caller: remoteIdentity })}</strong>
+        <strong title={remoteIdentity}>{t('calls.incomingFrom', { caller: remoteIdentity })}</strong>
         <span>{t('calls.line', { number: line.slot })} / {accountName}</span>
       </div>
       <Button large variant="success" icon="phone" label={t('calls.answer')} onClick={() => onAnswer(id)} />

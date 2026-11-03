@@ -5,7 +5,7 @@ import { useTranslation } from '../i18n/TranslatorProvider';
 import { usePermissions } from '../state/permissions';
 import type { PermState, PermissionsModel } from '../state/permissions';
 import { AccountForm } from './AccountForm';
-import { DeniedHint, PermBadge } from './PermissionStatus';
+import { DeniedHint, PermBadge, SettingsAction } from './PermissionStatus';
 import { Button } from './ui/Button';
 import { cx } from './ui/cx';
 
@@ -56,8 +56,9 @@ function PermissionStep({ def, state, settings, onAllow, onNext }: PermissionSte
       <h2 className="step-title">{t(def.titleKey)}</h2>
       <p className="muted">{t(def.whyKey)}</p>
       <p><PermBadge state={state} /></p>
-      <DeniedHint state={state} settings={settings} />
+      <DeniedHint state={state} />
       <div className="row">
+        <SettingsAction state={state} settings={settings} />
         {state === 'pending' ? <Button variant="primary" label={t('onboarding.allow')} onClick={() => void onAllow()} /> : null}
         {state === 'pending' ? <Button label={t('onboarding.skip')} onClick={onNext} /> : <Button variant="primary" label={t('onboarding.next')} onClick={onNext} />}
       </div>
