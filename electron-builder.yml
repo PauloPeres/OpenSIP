@@ -12,6 +12,7 @@ publish:
   owner: PauloPeres
   repo: OpenSIP
 mac:
+  icon: build/icon.icns
   category: public.app-category.utilities
   target:
     - target: dmg
@@ -19,10 +20,12 @@ mac:
     - target: zip
       arch: [x64, arm64]
 win:
+  icon: build/icon.png
   target:
     - target: nsis
       arch: [x64, arm64]
 linux:
+  icon: build/icon.png
   target:
     - target: AppImage
       arch: [x64]
