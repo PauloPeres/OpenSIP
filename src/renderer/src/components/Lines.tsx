@@ -60,14 +60,14 @@ function MediaMeter({ media }: { readonly media: CallView['media'] }): JSX.Eleme
 }
 
 function LineMeta({ line, env }: { readonly line: Line; readonly env: LineEnv }): JSX.Element {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const { view, index } = accountOf(env, line);
   return (
     <span className="line-meta">
       <span>{t('calls.line', { number: line.slot })}</span>
       <Avatar name={view?.account.displayName ?? ''} hue={index} />
       <span>{view?.account.displayName}</span>
-      <span>{t(`calls.direction.${line.view.call.direction}`)}</span>
+      <span>{tw(`calls.direction.${line.view.call.direction}`)}</span>
     </span>
   );
 }
@@ -75,14 +75,14 @@ function LineMeta({ line, env }: { readonly line: Line; readonly env: LineEnv })
 const GIVES_UP = 'calls.progress.givesUp'; // i18n-exempt: translation key
 
 function Progress({ view }: { readonly view: CallView }): JSX.Element | null {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const key = progressKey(view);
   if (key === null) return null;
   return (
     <>
       <span className={cx('progress', isPending(view) && 'progress-pending')}>
         {isPending(view) ? <i className="spinner" aria-hidden="true" /> : null}
-        {t(key)}
+        {tw(key)}
       </span>
       {isWaiting(view) ? <span className="progress-hint">{t(GIVES_UP)}</span> : null}
     </>
@@ -90,7 +90,7 @@ function Progress({ view }: { readonly view: CallView }): JSX.Element | null {
 }
 
 function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv }): JSX.Element {
-  const { t } = useTranslation();
+  const { tw } = useTranslation();
   const { call } = line.view;
   return (
     <>
@@ -101,7 +101,7 @@ function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv
         <LineMeta line={line} env={env} />
       </span>
       <span className="line-state">
-        <span className={cx('state', `state-${call.state}`)}>{t(callStateKey(call.state))}</span>
+        <span className={cx('state', `state-${call.state}`)}>{tw(callStateKey(call.state))}</span>
         <CallTimer view={line.view} env={env} />
       </span>
     </>

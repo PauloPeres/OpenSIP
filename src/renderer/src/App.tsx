@@ -12,6 +12,7 @@ import { Onboarding } from './components/Onboarding';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import type { ViewId } from './components/Sidebar';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Button } from './components/ui/Button';
 import { useTranslation } from './i18n/TranslatorProvider';
 import { useAnnouncement } from './state/useAnnouncement';
@@ -49,7 +50,7 @@ function AccountsView({ state }: { readonly state: AppState }): JSX.Element {
     return <AccountForm {...(initial ? { initial } : {})} onSave={actions.saveAccount} onDone={() => setEditing(null)} />;
   }
   return (
-    <section className="panel" aria-labelledby="accounts-title">
+    <section className="panel accounts" aria-labelledby="accounts-title">
       <div className="panel-head">
         <h2 id="accounts-title" className="panel-title">{t('accounts.title')}</h2>
         <Button variant="primary" label={t('accounts.add')} onClick={() => setEditing('new')} />
@@ -63,8 +64,12 @@ function PhoneView({ state, model, now, setupStarts }: Omit<ViewProps, 'view' | 
   const { snapshot, actions } = state;
   return (
     <div className="phone">
-      <LinesPanel model={model} env={{ accounts: snapshot.accounts, actions, now, setupStarts }} />
-      <Dialer accounts={snapshot.accounts} dial={actions.dial} onDialed={model.focus} />
+      <ErrorBoundary>
+        <LinesPanel model={model} env={{ accounts: snapshot.accounts, actions, now, setupStarts }} />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <Dialer accounts={snapshot.accounts} dial={actions.dial} onDialed={model.focus} />
+      </ErrorBoundary>
     </div>
   );
 }
@@ -110,20 +115,40 @@ function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
   return { model, now, setupStarts, announcement, ringtone: { enabled, set: setEnabled }, answer };
 }
 
+interface AlertsProps {
+  readonly state: AppState;
+  readonly flow: CallFlow;
+}
+
+/** Each wire-driven strip has its own boundary, so none of them can take the call controls down with it. */
+function Alerts({ state, flow }: AlertsProps): JSX.Element {
+  const { accounts, calls } = state.snapshot;
+  return (
+    <>
+      <ErrorBoundary>
+        <IncomingCalls lines={flow.model.lines} accounts={accounts} onAnswer={flow.answer} onReject={(id) => void state.actions.reject(id)} />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <StatusBar accounts={accounts} calls={calls} />
+      </ErrorBoundary>
+    </>
+  );
+}
+
 function Workspace({ state }: { readonly state: AppState }): JSX.Element {
   const { t } = useTranslation();
   const [view, setView] = useState<ViewId>('calls');
   const flow = useCallFlow(state, () => setView('calls'));
-  const { accounts } = state.snapshot;
   return (
     <div className="shell">
-      <Sidebar view={view} onView={setView} accounts={accounts} />
+      <Sidebar view={view} onView={setView} accounts={state.snapshot.accounts} />
       <div className="main">
-        <IncomingCalls lines={flow.model.lines} accounts={accounts} onAnswer={flow.answer} onReject={(id) => void state.actions.reject(id)} />
-        <StatusBar accounts={accounts} calls={state.snapshot.calls} />
+        <Alerts state={state} flow={flow} />
         {state.failed ? <p className="notice" role="alert">{t('error.unexpected')}</p> : null}
         <main className="view">
-          <ViewContent view={view} state={state} model={flow.model} now={flow.now} setupStarts={flow.setupStarts} ringtone={flow.ringtone} />
+          <ErrorBoundary key={view}>
+            <ViewContent view={view} state={state} model={flow.model} now={flow.now} setupStarts={flow.setupStarts} ringtone={flow.ringtone} />
+          </ErrorBoundary>
         </main>
       </div>
       <div className="sr-only" role="status" aria-live="polite">{flow.announcement}</div>

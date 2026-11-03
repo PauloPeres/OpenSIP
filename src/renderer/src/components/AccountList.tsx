@@ -59,7 +59,7 @@ function PowerSwitch({ view, onToggle, refused, busy }: PowerProps): JSX.Element
 }
 
 function AccountIdentity({ view }: { readonly view: AccountView }): JSX.Element {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const { account, registration, transport } = view;
   return (
     <div className="account-id">
@@ -67,20 +67,20 @@ function AccountIdentity({ view }: { readonly view: AccountView }): JSX.Element 
       <Breakable className="mono muted" text={account.uri} titled />
       <RegistrationNote registration={registration} failuresOnly />
       {transport === undefined || !view.account.enabled ? null : (
-        <span className="muted">{t('registration.transport', { transport: t(transportLabelKey(transport)) })}</span>
+        <span className="muted">{t('registration.transport', { transport: tw(transportLabelKey(transport)) })}</span>
       )}
     </div>
   );
 }
 
 function AccountRow({ view, index, onEdit, onRemove, onToggle, refusedId, busy }: RowProps): JSX.Element {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const { account } = view;
   return (
     <li className="account-row">
       <Avatar name={account.displayName} hue={index} tone={displayState(view)} />
       <AccountIdentity view={view} />
-      <Badge tone={displayState(view)} label={t(stateKey(view))} />
+      <Badge tone={displayState(view)} label={tw(stateKey(view))} />
       <Button label={t('accounts.edit')} onClick={() => onEdit(account)} />
       <Button label={t('accounts.remove')} variant="danger" onClick={() => onRemove(account)} />
       <SharingNote view={view} />

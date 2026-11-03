@@ -3,6 +3,8 @@ import type { Locale } from '@core/i18n';
 import type { UpdateStatus } from '../../../shared/api';
 import { PermissionsSection } from './PermissionsSection';
 import { SelectField, Switch } from './ui/Field';
+import { Segmented } from './ui/Segmented';
+import { THEMES, isTheme, useTheme } from '../state/theme';
 import { usePermissions } from '../state/permissions';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { TranslationApi } from '../i18n/TranslatorProvider';
@@ -35,6 +37,19 @@ function LanguageSelect(): JSX.Element {
   );
 }
 
+function ThemeSelect(): JSX.Element {
+  const { t } = useTranslation();
+  const [theme, setTheme] = useTheme();
+  const options = THEMES.map((choice) => ({ value: choice, label: t(`settings.theme.${choice}`) }));
+  return (
+    <div className="field">
+      <span className="field-title">{t('settings.theme')}</span>
+      <Segmented label={t('settings.theme')} value={theme} options={options} onChange={(v) => isTheme(v) && setTheme(v)} />
+      <span className="hint">{t('settings.theme.hint')}</span>
+    </div>
+  );
+}
+
 export interface RingtonePref {
   readonly enabled: boolean;
   readonly set: (next: boolean) => void;
@@ -46,6 +61,7 @@ export function SettingsPanel({ update, ringtone }: { readonly update: UpdateSta
   return (
     <div className="panel form">
       <LanguageSelect />
+      <ThemeSelect />
       <Switch id="ringtone" label={t('settings.ringtone')} hint={t('settings.ringtone.hint')} checked={ringtone.enabled} onChange={ringtone.set} />
       <PermissionsSection model={permissions} />
       <p className="muted" role="status">

@@ -6,7 +6,7 @@ import type { Line } from './useLines';
 
 /** Text for an aria-live region: the most recent call state change, as one sentence. */
 export function useAnnouncement(lines: readonly Line[]): string {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const seen = useRef(new Map<string, CallState>());
   const [message, setMessage] = useState('');
   useEffect(() => {
@@ -14,7 +14,7 @@ export function useAnnouncement(lines: readonly Line[]): string {
     seen.current = new Map(lines.map((l) => [l.view.call.id, l.view.call.state]));
     if (changed === undefined) return;
     const { call } = changed.view;
-    setMessage(`${t('calls.line', { number: changed.slot })}, ${call.remoteIdentity}: ${t(callStateKey(call.state))}`);
-  }, [lines, t]);
+    setMessage(`${t('calls.line', { number: changed.slot })}, ${call.remoteIdentity}: ${tw(callStateKey(call.state))}`);
+  }, [lines, t, tw]);
   return message;
 }

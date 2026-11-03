@@ -6,6 +6,7 @@ import { formatClock } from '../state/format';
 import type { AppActions } from '../state/useAppState';
 import { LEVELS, filterLogs, useFlash, useStickyScroll } from '../state/useLogView';
 import type { LogEntry, LogLevel } from '../state/useLogView';
+import { ErrorBoundary } from './ErrorBoundary';
 import { LogRow } from './LogRow';
 import { Button } from './ui/Button';
 import { SelectField, Switch } from './ui/Field';
@@ -25,17 +26,18 @@ interface LogControls {
   readonly clear: () => void;
 }
 
-function toPlainText(entries: readonly LogEntry[], t: TranslationApi['t']): string {
+function toPlainText(entries: readonly LogEntry[], { tw }: TranslationApi): string {
   return entries
-    .map((e) => `${formatClock(e.at)} ${t(`logs.level.${e.level}`)} ${t(e.messageKey, e.params)}${e.raw ? `\n${e.raw}` : ''}`)
+    .map((e) => `${formatClock(e.at)} ${tw(`logs.level.${e.level}`)} ${tw(e.messageKey, e.params)}${e.raw ? `\n${e.raw}` : ''}`)
     .join('\n');
 }
 
 function CopyButton({ entries }: { readonly entries: readonly LogEntry[] }): JSX.Element {
-  const { t } = useTranslation();
+  const api = useTranslation();
+  const { t } = api;
   const [copied, flash] = useFlash(1600);
   const copy = (): void => {
-    navigator.clipboard.writeText(toPlainText(entries, t)).then(flash).catch(() => undefined);
+    navigator.clipboard.writeText(toPlainText(entries, api)).then(flash).catch(() => undefined);
   };
   return <Button label={copied ? t('logs.copied') : t('logs.copy')} onClick={copy} disabled={entries.length === 0} />;
 }
@@ -62,7 +64,7 @@ function Filters({ accounts, accountId, minLevel, onAccount, onLevel }: FiltersP
 }
 
 function LogList({ entries, snapshot }: { readonly entries: readonly LogEntry[]; readonly snapshot: AppSnapshot }): JSX.Element {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   const scroll = useStickyScroll(entries[entries.length - 1]?.id);
   const names = new Map(snapshot.accounts.map((a) => [a.account.id, a.account.displayName]));
   return (
@@ -70,7 +72,9 @@ function LogList({ entries, snapshot }: { readonly entries: readonly LogEntry[];
       {entries.length === 0 ? <p className="muted pad">{t('logs.empty')}</p> : null}
       <ul className="log-list">
         {entries.map((entry) => (
-          <LogRow key={entry.id} entry={entry} accountName={names.get(entry.accountId ?? '') ?? ''} t={t} />
+          <ErrorBoundary key={entry.id} as="li">
+            <LogRow entry={entry} accountName={names.get(entry.accountId ?? '') ?? ''} t={t} tw={tw} />
+          </ErrorBoundary>
         ))}
       </ul>
     </div>

@@ -33,13 +33,13 @@ interface BarProps {
 const ENDED = 'calls.progress.ended'; // i18n-exempt: translation key
 
 function EndedRows({ calls }: { readonly calls: readonly CallView[] }): JSX.Element {
-  const { t } = useTranslation();
+  const { tw } = useTranslation();
   return (
     <>
       {calls.map((view) => (
         <p key={view.call.id} className="statusbar-row" role={isSetupTimeout(view) ? 'alert' : 'status'}>
           <strong><Breakable text={view.call.remoteIdentity} titled /></strong>
-          <span className={cx('progress', isSetupTimeout(view) && 'progress-bad')}>{t(endReasonKey(view) ?? ENDED)}</span>
+          <span className={cx('progress', isSetupTimeout(view) && 'progress-bad')}>{tw(endReasonKey(view) ?? ENDED)}</span>
         </p>
       ))}
     </>

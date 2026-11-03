@@ -9,6 +9,7 @@ interface LogRowProps {
   readonly entry: LogEntry;
   readonly accountName: string;
   readonly t: TranslationApi['t'];
+  readonly tw: TranslationApi['tw'];
 }
 
 function RawBlock({ raw, label }: { readonly raw: string; readonly label: string }): JSX.Element {
@@ -20,14 +21,14 @@ function RawBlock({ raw, label }: { readonly raw: string; readonly label: string
   );
 }
 
-function LogRowView({ entry, accountName, t }: LogRowProps): JSX.Element {
+function LogRowView({ entry, accountName, t, tw }: LogRowProps): JSX.Element {
   const loud = entry.level === 'warn' || entry.level === 'error';
   return (
     <li className={cx('log-row', `log-${entry.level}`)}>
       <time className="log-time" dateTime={new Date(entry.at).toISOString()}>{formatClock(entry.at)}</time>
-      <span className={loud ? 'log-level' : 'sr-only'}>{t(`logs.level.${entry.level}`)}</span>
+      <span className={loud ? 'log-level' : 'sr-only'}>{tw(`logs.level.${entry.level}`)}</span>
       <span className="log-message">
-        <Breakable text={t(entry.messageKey, entry.params)} />
+        <Breakable text={tw(entry.messageKey, entry.params)} />
         {accountName === '' ? null : <span className="log-account">{accountName}</span>}
         {entry.raw === undefined ? null : <RawBlock raw={entry.raw} label={t('logs.raw')} />}
       </span>
@@ -38,5 +39,5 @@ function LogRowView({ entry, accountName, t }: LogRowProps): JSX.Element {
 /** Entries are immutable per id, so a row only re-renders when its own data or the locale changes. */
 export const LogRow = memo(
   LogRowView,
-  (prev, next) => prev.entry.id === next.entry.id && prev.accountName === next.accountName && prev.t === next.t
+  (prev, next) => prev.entry.id === next.entry.id && prev.accountName === next.accountName && prev.t === next.t && prev.tw === next.tw
 );

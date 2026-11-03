@@ -24,7 +24,7 @@ interface SidebarProps {
 }
 
 function AccountStatus({ accounts }: { readonly accounts: readonly AccountView[] }): JSX.Element {
-  const { t } = useTranslation();
+  const { tw } = useTranslation();
   return (
     <ul className="status-list">
       {accounts.map((view, index) => (
@@ -32,7 +32,7 @@ function AccountStatus({ accounts }: { readonly accounts: readonly AccountView[]
           <Avatar name={view.account.displayName} hue={index} tone={displayState(view)} />
           <span className="status-text">
             <span className="status-name" title={view.account.displayName}>{view.account.displayName}</span>
-            <span className={`status-state status-${displayState(view)}`}>{t(stateKey(view))}</span>
+            <span className={`status-state status-${displayState(view)}`}>{tw(stateKey(view))}</span>
             <RegistrationNote registration={view.registration} failuresOnly />
           </span>
         </li>

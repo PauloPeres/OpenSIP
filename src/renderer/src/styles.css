@@ -3,38 +3,41 @@
   Incoming calls are a banner above every view. The phone view is lines on the left, dialer on the right.
 */
 :root {
-  color-scheme: light;
+  /* System follows the OS; an explicit choice sets data-theme on <html>. Each colour is defined once as light-dark(light, dark). */
+  color-scheme: light dark;
   /* Brand: Signal Teal fills (3.3:1 on white, fine for shapes), Ink text, Paper ground. */
   --brand: #0e9f8e;
   --ink: #0b1f26;
   --paper: #f4f7f7;
-  --bg: var(--paper);
-  --surface: #ffffff;
-  --surface-2: #eaf0f0;
-  --line: #d3dedf;
-  --line-strong: #7b9297;
-  --fg: var(--ink);
-  --fg-muted: #4a5f66;
+  --bg: light-dark(var(--paper), #071318);
+  --surface: light-dark(#ffffff, #0b1f26);
+  --surface-2: light-dark(#eaf0f0, #12303a);
+  --line: light-dark(#d3dedf, #1f3a44);
+  --line-strong: light-dark(#7b9297, #4e6b75);
+  --fg: light-dark(var(--ink), #e8efef);
+  --fg-muted: light-dark(#4a5f66, #9db2b8);
   /* Teal as text needs a darker step on light grounds (5.6:1 on white). */
-  --accent: #087565;
-  --accent-soft: #ddf2ef;
+  --accent: light-dark(#087565, #3ccdbb);
+  --accent-soft: light-dark(#ddf2ef, #0f3a3a);
   --on-accent: var(--ink);
   /* Status colours stay off the teal hue: ok is a yellow-green, never the accent. */
-  --ok: #2b7a1e;
-  --ok-soft: #e3f3dc;
-  --on-ok: #ffffff;
-  --warn: #8f5200;
-  --warn-soft: #fbeacb;
-  --bad: #c2271f;
-  --bad-soft: #fbe2e0;
-  --on-bad: #ffffff;
-  --idle: #7b9297;
-  --hue-0: #3b6fd4;
-  --hue-1: #7a4fc4;
-  --hue-2: #c0551a;
-  --hue-3: #ab2f86;
-  --logo-ink: var(--ink);
-  --shadow: 0 1px 2px rgb(11 31 38 / 8%), 0 6px 20px rgb(11 31 38 / 6%);
+  --ok: light-dark(#2b7a1e, #7bd865);
+  --ok-soft: light-dark(#e3f3dc, #143019);
+  --on-ok: light-dark(#ffffff, #06180a);
+  --warn: light-dark(#8f5200, #f2b24e);
+  --warn-soft: light-dark(#fbeacb, #3a2a0e);
+  --bad: light-dark(#c2271f, #ff8079);
+  --bad-soft: light-dark(#fbe2e0, #3e1a19);
+  --on-bad: light-dark(#ffffff, #1c0707);
+  --idle: light-dark(#7b9297, #5d7882);
+  --hue-0: light-dark(#3b6fd4, #7aa2f0);
+  --hue-1: light-dark(#7a4fc4, #b190ee);
+  --hue-2: light-dark(#c0551a, #f08a52);
+  --hue-3: light-dark(#ab2f86, #e676c0);
+  --logo-ink: light-dark(var(--ink), var(--paper));
+  --shadow-near: light-dark(rgb(11 31 38 / 8%), rgb(0 0 0 / 40%));
+  --shadow-far: light-dark(rgb(11 31 38 / 6%), rgb(0 0 0 / 30%));
+  --shadow: 0 1px 2px var(--shadow-near), 0 8px 24px var(--shadow-far);
 
   --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
@@ -54,39 +57,13 @@
   /* One content width for every view: Calls, Accounts, Logs and Settings all fill the area up to this. */
   --content-max: 60rem;
 }
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #071318;
-    --surface: #0b1f26;
-    --surface-2: #12303a;
-    --line: #1f3a44;
-    --line-strong: #4e6b75;
-    --fg: #e8efef;
-    --fg-muted: #9db2b8;
-    --accent: #3ccdbb;
-    --accent-soft: #0f3a3a;
-    --ok: #7bd865;
-    --ok-soft: #143019;
-    --on-ok: #06180a;
-    --warn: #f2b24e;
-    --warn-soft: #3a2a0e;
-    --bad: #ff8079;
-    --bad-soft: #3e1a19;
-    --on-bad: #1c0707;
-    --idle: #5d7882;
-    --hue-0: #7aa2f0;
-    --hue-1: #b190ee;
-    --hue-2: #f08a52;
-    --hue-3: #e676c0;
-    --logo-ink: var(--paper);
-    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 30%);
-  }
-}
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* The window never scrolls as a whole; only the lists inside the panels do. */
+html, body { overflow: hidden; }
 body {
   background: var(--bg);
   color: var(--fg);
@@ -108,9 +85,10 @@ button:disabled { cursor: default; }
 .pad { padding: var(--s-4); }
 
 /* Shell */
-.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100%; }
+/* Positioned so visually hidden (absolute) text stays inside the box that scrolls instead of stretching the page. */
+.shell { position: relative; display: grid; grid-template-columns: 232px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; overflow: hidden; }
 .sidebar {
-  display: flex; flex-direction: column; gap: var(--s-5); padding: var(--s-5) var(--s-3);
+  position: relative; display: flex; flex-direction: column; gap: var(--s-5); padding: var(--s-5) var(--s-3);
   background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto;
 }
 .brand { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--s-2); }
@@ -131,9 +109,15 @@ button:disabled { cursor: default; }
 .status-name { font-weight: 600; font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-state { font-size: var(--fs-xs); color: var(--fg-muted); }
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.view { flex: 1; display: flex; flex-direction: column; gap: var(--s-5); min-height: 0; overflow-y: auto; padding: var(--s-5); }
-.view > * { flex: none; width: 100%; max-width: var(--content-max); margin-inline: auto; }
-.view > .logs { flex: 1 1 0; min-height: 0; }
+.view { position: relative; flex: 1; display: flex; flex-direction: column; gap: var(--s-5); min-height: 0; overflow: hidden; padding: var(--s-5); }
+.view > * { flex: 0 1 auto; min-height: 0; width: 100%; max-width: var(--content-max); margin-inline: auto; overflow-y: auto; }
+/* Lists fill the space left under the header and scroll on their own. */
+.view > .logs, .view > .accounts, .view > .phone { flex: 1 1 0; }
+.view > .accounts, .view > .phone { overflow: hidden; }
+.accounts { display: flex; flex-direction: column; }
+.accounts .account-list, .lines .line-list { flex: 1; min-height: 0; overflow-y: auto; }
+.lines { display: flex; flex-direction: column; min-height: 0; }
+.lines .empty { flex: 1; justify-content: center; }
 
 /* Icons */
 .icon { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -148,7 +132,8 @@ button:disabled { cursor: default; }
 }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--s-4); }
 .panel-head .panel-title { margin: 0; }
-.phone { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: var(--s-5); align-items: start; }
+.phone { display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: minmax(0, 1fr); gap: var(--s-5); }
+.phone > * { min-height: 0; overflow-y: auto; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); padding: var(--s-6) var(--s-4); color: var(--fg-muted); text-align: center; }
 .empty .icon { width: 32px; height: 32px; opacity: 0.6; }
 .notice { padding: var(--s-3) var(--s-4); border-radius: var(--r-1); background: var(--warn-soft); color: var(--warn); font-size: var(--fs-sm); font-weight: 500; }
@@ -176,7 +161,7 @@ button:disabled { cursor: default; }
 
 /* Fields */
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.field label { font-size: var(--fs-sm); font-weight: 600; color: var(--fg-muted); }
+.field label, .field-title { font-size: var(--fs-sm); font-weight: 600; color: var(--fg-muted); }
 input[type='text'], input[type='password'], input[type='number'], select {
   width: 100%; min-height: 40px; padding: 0 var(--s-3); border: 1px solid var(--line-strong); border-radius: var(--r-1); background: var(--surface);
 }
@@ -354,11 +339,11 @@ button.line:hover:not(:disabled) { border-color: var(--accent); }
 .log-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s-3); }
 .log-filters .field { min-width: 160px; }
 .log-actions { display: flex; gap: var(--s-2); }
-.segmented { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-1); overflow: hidden; }
+.segmented { align-self: flex-start; display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-1); overflow: hidden; }
 .seg { min-height: 38px; padding: 0 var(--s-3); border: 0; border-left: 1px solid var(--line); background: var(--surface); color: var(--fg-muted); font-size: var(--fs-sm); }
 .seg:first-child { border-left: 0; }
 .seg-on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.log-scroll { flex: 1; min-height: 160px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2); }
+.log-scroll { position: relative; flex: 1; min-height: 120px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-1); background: var(--surface-2); }
 .log-row { display: grid; grid-template-columns: 5.5rem auto minmax(0, 1fr); gap: 0 var(--s-3); padding: 5px var(--s-3); border-left: 3px solid transparent; font-size: var(--fs-sm); }
 .log-row + .log-row { border-top: 1px solid var(--line); }
 .log-time { color: var(--fg-muted); font-size: var(--fs-xs); padding-top: 2px; }
@@ -389,7 +374,8 @@ button.line:hover:not(:disabled) { border-color: var(--accent); }
 
 /* Narrow windows */
 @media (max-width: 880px) {
-  .phone { grid-template-columns: minmax(0, 1fr); }
+  .phone { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-auto-rows: min-content; overflow-y: auto; }
+  .phone > * { overflow-y: visible; }
 }
 @media (max-width: 640px) {
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }

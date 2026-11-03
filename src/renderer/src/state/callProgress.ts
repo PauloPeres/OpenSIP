@@ -6,13 +6,6 @@ export type ProgressedView = CallView & { readonly progress?: string; readonly e
 const SETUP_TIMEOUT = 'calls.endReason.setupTimeout'; // i18n-exempt: translation key
 const STAGES: readonly string[] = ['trying', 'waiting', 'ringing', 'connecting', 'active', 'ended'];
 const PENDING: readonly string[] = ['trying', 'waiting', 'ringing', 'connecting'];
-const END_REASONS: readonly string[] = [
-  'calls.endReason.busy', // i18n-exempt: translation key
-  'calls.endReason.declined', // i18n-exempt: translation key
-  SETUP_TIMEOUT,
-  'calls.endReason.unanswered', // i18n-exempt: translation key
-  'calls.endReason.unreachable' // i18n-exempt: translation key
-];
 const PROGRESS_PREFIX = 'calls.progress.'; // i18n-exempt: translation key prefix
 
 function derivedStage(view: CallView): string | null {
@@ -47,9 +40,10 @@ export function isSetupTimeout(view: ProgressedView): boolean {
   return view.endReasonKey === SETUP_TIMEOUT;
 }
 
+/** Any reason the engine names is shown; one this build does not know is displayed as its key, not hidden. */
 export function endReasonKey(view: ProgressedView): string | null {
   const key = view.endReasonKey;
-  return key !== undefined && END_REASONS.includes(key) ? key : null;
+  return key === undefined || key === '' ? null : key;
 }
 
 /** True while the call is still being set up, so the status can animate. */

@@ -47,17 +47,11 @@ function TargetField({ model }: { readonly model: DialerModel }): JSX.Element {
 }
 
 function DialError({ errorKey }: { readonly errorKey: string | null }): JSX.Element | null {
-  const { t } = useTranslation();
+  const { tw } = useTranslation();
   if (errorKey === null) return null;
-  let text: string;
-  try {
-    text = t(errorKey);
-  } catch {
-    text = t('calls.error.failed');
-  }
   return (
     <p className="field-error" role="alert">
-      {text}
+      {tw(errorKey)}
     </p>
   );
 }

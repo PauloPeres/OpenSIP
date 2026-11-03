@@ -1,6 +1,5 @@
 import type { RegistrationSnapshot } from '@core/sip';
 import { useTranslation } from '../i18n/TranslatorProvider';
-import { textOrFallback } from '../state/format';
 
 /** Says what registration is doing: waiting while it registers, the reason when it fails. */
 interface NoteProps {
@@ -10,7 +9,7 @@ interface NoteProps {
 }
 
 export function RegistrationNote({ registration, failuresOnly = false }: NoteProps): JSX.Element | null {
-  const { t } = useTranslation();
+  const { t, tw } = useTranslation();
   if (registration.state === 'registering' && !failuresOnly) {
     return (
       <span className="progress progress-pending">
@@ -20,6 +19,6 @@ export function RegistrationNote({ registration, failuresOnly = false }: NotePro
     );
   }
   if (registration.state !== 'failed') return null;
-  const reason = registration.failureReason ?? 'registration.state.failed';
-  return <span className="progress progress-bad">{textOrFallback(t, reason, 'registration.state.failed')}</span>;
+  const reason = registration.failureReason;
+  return <span className="progress progress-bad">{reason === undefined ? t('registration.state.failed') : tw(reason)}</span>;
 }
