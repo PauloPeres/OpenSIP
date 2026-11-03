@@ -16,6 +16,8 @@ import { log } from './windows';
 export interface PersistedState {
   readonly accounts: AccountStoreState;
   readonly locale?: Locale;
+  /** Raw SIP capture; persisted so a diagnosis survives a restart. */
+  readonly debugLogging?: boolean;
 }
 
 type StoredAccount = Omit<SipAccount, 'password'> & {
@@ -26,6 +28,7 @@ type StoredAccount = Omit<SipAccount, 'password'> & {
 interface StoredFile {
   readonly accounts?: Readonly<Record<string, StoredAccount>>;
   readonly locale?: string;
+  readonly debugLogging?: boolean;
 }
 
 const filePath = (): string => join(app.getPath('userData'), 'accounts.json');
@@ -54,9 +57,9 @@ function decodeAll(stored: Readonly<Record<string, StoredAccount>>): AccountStor
 
 function toPersisted(file: StoredFile): PersistedState {
   const accounts = file.accounts ? decodeAll(file.accounts) : emptyAccountStore;
-  return file.locale !== undefined && isSupportedLocale(file.locale)
-    ? { accounts, locale: file.locale }
-    : { accounts };
+  const locale = file.locale !== undefined && isSupportedLocale(file.locale) ? { locale: file.locale } : {};
+  const debugLogging = typeof file.debugLogging === 'boolean' ? { debugLogging: file.debugLogging } : {};
+  return { accounts, ...locale, ...debugLogging };
 }
 
 export async function loadState(): Promise<PersistedState> {
@@ -73,7 +76,11 @@ export async function saveState(state: PersistedState): Promise<void> {
   const accounts = Object.fromEntries(
     Object.entries(state.accounts).map(([id, account]) => [id, encode(account)])
   );
-  const payload: StoredFile = state.locale === undefined ? { accounts } : { accounts, locale: state.locale };
+  const payload: StoredFile = {
+    accounts,
+    ...(state.locale === undefined ? {} : { locale: state.locale }),
+    ...(state.debugLogging === undefined ? {} : { debugLogging: state.debugLogging })
+  };
   await mkdir(dirname(filePath()), { recursive: true });
   await writeFile(filePath(), JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
 }

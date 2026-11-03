@@ -1,31 +1,47 @@
 /*
- * Native SIP engine (replaces the sip.js adapter).
+ * Native SIP engine.
  *
- * SCOPE OF THIS MILESTONE: signalling only. Registration, inbound INVITE/BYE/
- * CANCEL handling and answer/reject/hangup/hold/resume work at the SIP level.
- * RTP IS THE NEXT MILESTONE: the SDP we send advertises PCMU/8000 sendrecv on a
- * placeholder port that nothing reads, so answering a call establishes
- * signalling only. NO AUDIO FLOWS.
+ * Signalling and media: registration, inbound and outbound INVITE, BYE/CANCEL,
+ * hold/resume re-INVITEs, and the RTP session and microphone/speaker streams
+ * that carry the call's audio (see ../media).
  *
  * All registration and call state transitions go through the pure reducers in
  * `@core/sip`; this file only translates wire events into reducer events and
  * performs I/O. Invalid transitions are logged, never thrown at the user.
+ * Everything worth showing the user goes to the diagnostics log as i18n keys.
  */
 import { createHash } from 'node:crypto';
+import { createDiagnosticsLog } from '@core/diagnostics';
+import type { DiagnosticsLog, LogLevel } from '@core/diagnostics';
+import { PCMA_PAYLOAD_TYPE, PCMU_PAYLOAD_TYPE } from '@core/rtp';
 import {
+  ConcurrentCallLimitError,
+  InvalidCallTargetError,
+  MalformedSdpError,
+  NoCommonCodecError,
   TRANSPORT_ERROR_KEYS,
   activeCalls,
   applyCallEvent,
+  buildAuthorization,
+  buildOffer,
   callsForAccount,
   canRetry,
   emptyCallRegistry,
   headerValue,
   headerValues,
+  holdDirection,
   incomingCall,
   initialRegistration,
   isResponse,
+  negotiate,
+  normaliseTarget,
+  outgoingCall,
+  parseChallenge,
+  parseSdp,
   parseUri,
   reduceRegistration,
+  resumeDirection,
+  serialize,
   withHeader
 } from '@core/sip';
 import type {
@@ -35,12 +51,19 @@ import type {
   CallSession,
   RegistrationEvent,
   RegistrationSnapshot,
+  SdpDirection,
+  SessionDescription,
   SipAccount,
   SipHeaders,
+  SipMessage,
   SipRequest,
   SipResponse,
   TransportCandidate
 } from '@core/sip';
+import type { CallView, DialResult, DtmfDigit } from '../../shared/api';
+import { allocateRtpPort, createRtpSession } from '../media/rtp-session';
+import type { RtpSession, RtpSessionOptions } from '../media/rtp-session';
+import type { MediaBridge } from '../media/media-window';
 import { log } from '../windows';
 import { openConnection } from './connection';
 import type { SipConnection } from './connection';
@@ -48,27 +71,39 @@ import { defaultIdFactory } from './ids';
 import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
 import type { ProbeDeps } from './prober';
-import { USER_AGENT, register } from './registrar';
+import { TIMER_T1_MS, UDP_MAX_TRANSMISSIONS, UDP_TRANSACTION_TIMEOUT_MS, USER_AGENT, register } from './registrar';
 
 const REFRESH_FRACTION = 0.9;
 const MIN_REFRESH_MS = 5_000;
 const RETRY_DELAY_MS = 30_000;
 const MAX_RETRIES = 3;
 const UNREGISTER_TIMEOUT_MS = 1_500;
-/** Placeholder: no RTP socket exists yet (see file header). */
-const RTP_PLACEHOLDER_PORT = 40_000;
 const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
+const SUPPORTED_CODECS: readonly number[] = [PCMU_PAYLOAD_TYPE, PCMA_PAYLOAD_TYPE];
+/** The i18n catalogue has one generic key for a call that did not complete, whatever the cause. */
+const CALL_FAILED_KEY = 'calls.error.failed';
 
 const md5 = (input: string): string => createHash('md5').update(input).digest('hex');
 
 type Listener = () => void;
 type Timer = ReturnType<typeof setTimeout>;
-type Direction = 'sendrecv' | 'sendonly';
+type Role = 'uac' | 'uas';
+type AuthHeader = 'authorization' | 'proxy-authorization';
+
+/** Creates and numbers the RTP port and session of one call. */
+export interface RtpFactory {
+  allocatePort(): Promise<number>;
+  create(options: RtpSessionOptions): RtpSession;
+}
 
 export interface EngineDeps {
   readonly probe: ProbeDeps;
   readonly ids: IdFactory;
   readonly open: typeof openConnection;
+  readonly diagnostics: DiagnosticsLog;
+  readonly media: MediaBridge;
+  readonly rtp: RtpFactory;
+  readonly now: () => number;
 }
 
 interface Entry {
@@ -80,12 +115,65 @@ interface Entry {
   stopped: boolean;
 }
 
+interface MediaPlan {
+  readonly payloadType: number;
+  readonly dtmfPayloadType: number | undefined;
+  readonly host: string;
+  readonly port: number;
+}
+
+interface LiveMedia {
+  readonly session: RtpSession;
+  readonly stopPlayback: () => void;
+}
+
+interface Credentials {
+  readonly header: AuthHeader;
+  readonly value: string;
+}
+
+/** The client INVITE transaction we are waiting on (outbound calls only). */
+interface Pending {
+  readonly cseq: number;
+  readonly authenticated: boolean;
+  readonly request: SipRequest;
+  stop(): void;
+}
+
+type Stage = 'early' | 'answered' | 'confirmed';
+
 interface Dialog {
   readonly entry: Entry;
+  readonly role: Role;
+  readonly callId: string;
+  /** UAS: the INVITE we received. UAC: the first INVITE we sent. */
   readonly invite: SipRequest;
-  readonly toTag: string;
+  readonly localTag: string;
+  readonly sdpSession: string;
+  /** The From header of every request we originate in this dialog. */
+  readonly localHeader: string;
+  remoteHeader: string;
+  /** Request-URI for in-dialog requests: the peer's Contact. */
+  target: string;
+  routes: readonly string[];
+  /** The last CSeq we used. */
   cseq: number;
+  stage: Stage;
+  rtpPort: number;
+  direction: SdpDirection;
+  plan: MediaPlan | undefined;
+  media: LiveMedia | undefined;
+  pending: Pending | undefined;
+  held: boolean;
+  muted: boolean;
+  cancelled: boolean;
+  connectedAt: number | undefined;
 }
+
+type DialogBase = Pick<
+  Dialog,
+  'entry' | 'role' | 'callId' | 'invite' | 'localTag' | 'sdpSession' | 'remoteHeader' | 'target' | 'routes' | 'direction' | 'plan' | 'rtpPort'
+>;
 
 /* ------------------------------------------------------------------ wire */
 
@@ -108,21 +196,6 @@ function identityOf(from: string): string {
   const [, quoted = '', bare = '', uri = from.split(';')[0] ?? ''] = NAME_ADDR.exec(from) ?? [];
   const display = (quoted || bare).trim();
   return display === '' ? uriIdentity(uri.trim()) : display;
-}
-
-function buildSdp(host: string, direction: Direction): string {
-  const family = host.includes(':') ? 'IP6' : 'IP4';
-  return [
-    'v=0',
-    `o=opensip 0 0 IN ${family} ${host}`,
-    's=OpenSIP',
-    `c=IN ${family} ${host}`,
-    't=0 0',
-    `m=audio ${RTP_PLACEHOLDER_PORT} RTP/AVP 0`,
-    'a=rtpmap:0 PCMU/8000',
-    `a=${direction}`,
-    ''
-  ].join('\r\n');
 }
 
 const reachableAt = (connection: SipConnection): { host: string; port: number } =>
@@ -160,49 +233,199 @@ function buildReply(
   return { kind: 'response', status, reason, headers, body: options.body ?? '' };
 }
 
+const isChallenge = (response: SipResponse): boolean => response.status === 401 || response.status === 407;
+
+/** The CSeq number of a response to an INVITE, or undefined for any other method. */
+function inviteCseq(response: SipResponse): number | undefined {
+  const [number = '', method = ''] = first(response.headers, 'cseq').split(' ');
+  return method === 'INVITE' ? Number.parseInt(number, 10) : undefined;
+}
+
 const stripBrackets = (contact: string): string => (/<([^>]+)>/.exec(contact)?.[1] ?? contact).split(';')[0] ?? contact;
 
-function dialogHeaders(dialog: Dialog, cseq: string, branch: string): SipHeaders {
-  const { entry, invite } = dialog;
-  const connection = entry.connection as SipConnection;
+const localHeaderOf = (entry: Entry, tag: string): string => `<${entry.account.uri}>;tag=${tag}`;
+
+interface RequestParts {
+  readonly entry: Entry;
+  readonly from: string;
+  readonly to: string;
+  readonly callId: string;
+  readonly cseq: string;
+  readonly branch: string;
+  readonly routes: readonly string[];
+}
+
+function requestHeaders(parts: RequestParts): SipHeaders {
+  const connection = parts.entry.connection as SipConnection;
   const local = connection.localAddress;
   const transport = connection.candidate.transport.toUpperCase();
   return {
-    via: [`SIP/2.0/${transport} ${local.host}:${local.port};branch=${branch};rport`],
+    via: [`SIP/2.0/${transport} ${local.host}:${local.port};branch=${parts.branch};rport`],
     'max-forwards': ['70'],
-    route: headerValues(invite.headers, 'record-route'),
-    from: [`<${entry.account.uri}>;tag=${dialog.toTag}`],
-    to: [first(invite.headers, 'from')],
-    'call-id': [first(invite.headers, 'call-id')],
-    cseq: [cseq],
-    contact: [contactFor(entry, connection)],
+    route: parts.routes,
+    from: [parts.from],
+    to: [parts.to],
+    'call-id': [parts.callId],
+    cseq: [parts.cseq],
+    contact: [contactFor(parts.entry, connection)],
     'user-agent': [USER_AGENT]
   };
 }
 
-function buildDialogRequest(
-  dialog: Dialog,
-  method: string,
-  cseq: number,
-  ids: IdFactory,
-  body?: string
-): SipRequest {
-  const uri = stripBrackets(first(dialog.invite.headers, 'contact'));
-  const headers = dialogHeaders(dialog, `${cseq} ${method}`, ids.newBranch());
+function buildDialogRequest(dialog: Dialog, method: string, cseq: number, branch: string, body?: string): SipRequest {
+  const headers = requestHeaders({
+    entry: dialog.entry,
+    from: dialog.localHeader,
+    to: dialog.remoteHeader,
+    callId: dialog.callId,
+    cseq: `${cseq} ${method}`,
+    branch,
+    routes: dialog.routes
+  });
   const typed = body === undefined ? headers : withHeader(headers, 'content-type', 'application/sdp');
-  return { kind: 'request', method, uri, headers: typed, body: body ?? '' };
+  return { kind: 'request', method, uri: dialog.target, headers: typed, body: body ?? '' };
+}
+
+type InviteParty = Pick<Dialog, 'entry' | 'localHeader' | 'target' | 'callId'>;
+
+function buildInvite(dialog: InviteParty, cseq: number, branch: string, body: string, auth?: Credentials): SipRequest {
+  const headers = requestHeaders({
+    entry: dialog.entry,
+    from: dialog.localHeader,
+    to: `<${dialog.target}>`,
+    callId: dialog.callId,
+    cseq: `${cseq} INVITE`,
+    branch,
+    routes: []
+  });
+  const typed = withHeader(withHeader(headers, 'content-type', 'application/sdp'), 'allow', ALLOW);
+  const signed = auth === undefined ? typed : withHeader(typed, auth.header, auth.value);
+  return { kind: 'request', method: 'INVITE', uri: dialog.target, headers: signed, body };
+}
+
+const pick = (headers: SipHeaders, names: readonly string[]): SipHeaders =>
+  Object.fromEntries(names.map((name) => [name, headerValues(headers, name)] as const).filter(([, values]) => values.length > 0));
+
+/** CANCEL repeats the INVITE's Via (same branch), URI, From, To and Call-ID (RFC 3261 9.1). */
+function buildCancel(invite: SipRequest): SipRequest {
+  const cseq = `${Number.parseInt(first(invite.headers, 'cseq'), 10)} CANCEL`;
+  const headers = withHeader(pick(invite.headers, ['via', 'max-forwards', 'from', 'to', 'call-id', 'user-agent']), 'cseq', cseq);
+  return { kind: 'request', method: 'CANCEL', uri: invite.uri, headers, body: '' };
+}
+
+/** The ACK for a non-2xx final response is part of the INVITE transaction: same branch and CSeq number. */
+function buildFailureAck(invite: SipRequest, response: SipResponse): SipRequest {
+  const cseq = `${Number.parseInt(first(invite.headers, 'cseq'), 10)} ACK`;
+  const base = pick(invite.headers, ['via', 'max-forwards', 'from', 'call-id', 'route', 'user-agent']);
+  const headers = withHeader(withHeader(base, 'to', first(response.headers, 'to')), 'cseq', cseq);
+  return { kind: 'request', method: 'ACK', uri: invite.uri, headers, body: '' };
+}
+
+/* ------------------------------------------------------------------- SDP */
+
+interface Negotiated {
+  readonly plan: MediaPlan;
+  readonly direction: SdpDirection;
+}
+
+function telephoneEventType(rtpmap: Readonly<Record<number, string>>): number | undefined {
+  const found = Object.entries(rtpmap).find(([, codec]) => /^telephone-event\/8000/i.test(codec));
+  return found === undefined ? undefined : Number(found[0]);
+}
+
+function planOf(description: SessionDescription, payloadType: number): MediaPlan | undefined {
+  const { port, rtpmap } = description.audio;
+  if (port === 0) return undefined;
+  return { payloadType, dtmfPayloadType: telephoneEventType(rtpmap), host: description.connectionAddress, port };
+}
+
+/** An offer or an answer we cannot use (no body, malformed, no shared codec, stream refused) yields undefined. */
+function negotiateBody(body: string): Negotiated | undefined {
+  try {
+    const description = parseSdp(body);
+    const { payloadType, direction } = negotiate(description, SUPPORTED_CODECS);
+    const plan = planOf(description, payloadType);
+    return plan === undefined ? undefined : { plan, direction };
+  } catch (error) {
+    if (error instanceof MalformedSdpError || error instanceof NoCommonCodecError) return undefined;
+    throw error;
+  }
+}
+
+/* ---------------------------------------------------------- client timers */
+
+/** Timer A resends an unanswered INVITE over UDP; timer B gives up (RFC 3261 17.1.1). */
+function startInviteTimers(resend: () => void, onTimeout: () => void, datagram: boolean): () => void {
+  const state = { sent: 1, delay: TIMER_T1_MS, resend: undefined as Timer | undefined };
+  const timeout = setTimeout(onTimeout, UDP_TRANSACTION_TIMEOUT_MS);
+  const tick = (): void => {
+    resend();
+    state.sent += 1;
+    state.delay *= 2;
+    if (state.sent < UDP_MAX_TRANSMISSIONS) state.resend = setTimeout(tick, state.delay);
+  };
+  if (datagram) state.resend = setTimeout(tick, state.delay);
+  return () => {
+    clearTimeout(timeout);
+    clearTimeout(state.resend);
+  };
 }
 
 /* ---------------------------------------------------------------- engine */
 
+const noMedia: MediaBridge = {
+  start: (): void => undefined,
+  stop: (): void => undefined,
+  play: (): void => undefined,
+  onCapture: () => (): void => undefined,
+  dispose: (): void => undefined
+};
+
+const defaultRtp: RtpFactory = {
+  allocatePort: () => allocateRtpPort(),
+  create: (options) => createRtpSession(options, { onError: (error) => log('warn', `rtp: ${String(error)}`) })
+};
+
 const defaultDeps = (): EngineDeps => ({
   probe: createProbeDeps(),
   ids: defaultIdFactory,
-  open: openConnection
+  open: openConnection,
+  diagnostics: createDiagnosticsLog(),
+  media: noMedia,
+  rtp: defaultRtp,
+  now: () => Date.now()
 });
 
 const technical = (error: unknown): string =>
   (error as { code?: string } | null)?.code ?? (error instanceof Error ? error.message : String(error));
+
+const fail = (errorKey: string): DialResult => ({ ok: false, errorKey });
+
+interface Note {
+  readonly params?: Readonly<Record<string, string>>;
+  readonly level?: LogLevel;
+  readonly raw?: string;
+}
+
+function sessionOptions(localPort: number, plan: MediaPlan): RtpSessionOptions {
+  return {
+    localPort,
+    remoteHost: plan.host,
+    remotePort: plan.port,
+    payloadType: plan.payloadType,
+    ...(plan.dtmfPayloadType === undefined ? {} : { dtmfPayloadType: plan.dtmfPayloadType })
+  };
+}
+
+function viewOf(call: CallSession, dialog: Dialog | undefined): CallView {
+  const connectedAt = dialog?.connectedAt;
+  const media = dialog?.media;
+  return {
+    call,
+    ...(connectedAt === undefined ? {} : { connectedAt }),
+    ...(media === undefined || dialog === undefined ? {} : { media: { ...media.session.stats, muted: dialog.muted } })
+  };
+}
 
 export class SipEngine {
   private readonly entries = new Map<AccountId, Entry>();
@@ -210,9 +433,13 @@ export class SipEngine {
   private registry: CallRegistry = emptyCallRegistry;
   private readonly listeners = new Set<Listener>();
   private readonly deps: EngineDeps;
+  private readonly stopCapture: () => void;
 
   constructor(deps: Partial<EngineDeps> = {}) {
     this.deps = { ...defaultDeps(), ...deps };
+    this.stopCapture = this.deps.media.onCapture((callId, samples) =>
+      this.dialogs.get(callId)?.media?.session.sendPcm(samples)
+    );
   }
 
   onChange(listener: Listener): () => void {
@@ -222,8 +449,8 @@ export class SipEngine {
     };
   }
 
-  getCalls(): readonly CallSession[] {
-    return activeCalls(this.registry);
+  getCallViews(): readonly CallView[] {
+    return activeCalls(this.registry).map((call) => viewOf(call, this.dialogs.get(call.id)));
   }
 
   getRegistrations(): Readonly<Record<AccountId, RegistrationSnapshot>> {
@@ -243,6 +470,7 @@ export class SipEngine {
 
   async stop(): Promise<void> {
     await Promise.all([...this.entries.keys()].map((id) => this.stopAccount(id)));
+    this.stopCapture();
   }
 
   /** Returns once the account is registering; discovery and REGISTER continue in the background. */
@@ -272,16 +500,25 @@ export class SipEngine {
     this.emit();
   }
 
+  /* ------------------------------------------------------------- calls */
+
   async answer(callId: string): Promise<void> {
     const dialog = this.requireDialog(callId);
     if (!this.dispatchCall(callId, { type: 'answer' })) return;
-    await this.reply(dialog, 200, 'OK', buildSdp(this.hostOf(dialog), 'sendrecv'));
+    try {
+      dialog.rtpPort = await this.deps.rtp.allocatePort();
+    } catch (error) {
+      return this.abandon(dialog, `no RTP port: ${String(error)}`);
+    }
+    if (this.dialogs.get(callId) !== dialog) return;
+    dialog.stage = 'answered';
+    await this.reply(dialog, 200, 'OK', this.sdpFor(dialog, dialog.direction));
   }
 
   async reject(callId: string): Promise<void> {
     const dialog = this.requireDialog(callId);
     if (!this.dispatchCall(callId, { type: 'reject' })) return;
-    this.dialogs.delete(callId);
+    this.releaseDialog(dialog);
     await this.reply(dialog, 603, 'Decline');
   }
 
@@ -289,7 +526,8 @@ export class SipEngine {
     const dialog = this.requireDialog(callId);
     const ringing = this.registry[callId]?.state === 'ringing';
     if (!this.dispatchCall(callId, { type: ringing ? 'reject' : 'hangup' })) return;
-    this.dialogs.delete(callId);
+    if (dialog.role === 'uac' && dialog.stage === 'early') return this.cancel(dialog);
+    this.releaseDialog(dialog);
     if (ringing) await this.reply(dialog, 603, 'Decline');
     else await this.sendRequest(dialog, 'BYE');
   }
@@ -297,13 +535,299 @@ export class SipEngine {
   async hold(callId: string): Promise<void> {
     const dialog = this.requireDialog(callId);
     if (!this.dispatchCall(callId, { type: 'hold' })) return;
-    await this.sendRequest(dialog, 'INVITE', buildSdp(this.hostOf(dialog), 'sendonly'));
+    dialog.held = true;
+    dialog.direction = holdDirection(dialog.direction);
+    this.applyMute(dialog);
+    await this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction));
   }
 
   async resume(callId: string): Promise<void> {
     const dialog = this.requireDialog(callId);
     if (!this.dispatchCall(callId, { type: 'resume' })) return;
-    await this.sendRequest(dialog, 'INVITE', buildSdp(this.hostOf(dialog), 'sendrecv'));
+    dialog.held = false;
+    dialog.direction = resumeDirection(dialog.direction);
+    this.applyMute(dialog);
+    await this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction));
+  }
+
+  sendDtmf(callId: string, digit: DtmfDigit): void {
+    this.dialogs.get(callId)?.media?.session.sendDtmf(digit);
+  }
+
+  setMuted(callId: string, muted: boolean): void {
+    const dialog = this.dialogs.get(callId);
+    if (dialog === undefined) return;
+    dialog.muted = muted;
+    this.applyMute(dialog);
+    this.emit();
+  }
+
+  /** Places a call. Resolves once the INVITE is on its way; later failures end the call and are logged. */
+  async dial(accountId: AccountId, target: string): Promise<DialResult> {
+    const entry = this.entries.get(accountId);
+    if (entry?.connection === undefined || entry.snapshot.state !== 'registered') return fail('calls.error.notRegistered');
+    const uri = this.normalise(target, entry.account.domain);
+    if (uri === undefined) return fail('calls.error.invalidTarget');
+    const callId = this.deps.ids.newCallId(reachableAt(entry.connection).host);
+    const refusal = this.openOutgoing({ id: callId, accountId, target: uri });
+    if (refusal !== undefined) return fail(refusal);
+    return this.launch(entry, callId, uri);
+  }
+
+  /* ------------------------------------------------------ outbound calls */
+
+  private normalise(target: string, domain: string): string | undefined {
+    try {
+      return normaliseTarget(target, domain);
+    } catch (error) {
+      if (error instanceof InvalidCallTargetError) return undefined;
+      throw error;
+    }
+  }
+
+  private openOutgoing(params: { id: string; accountId: AccountId; target: string }): string | undefined {
+    try {
+      this.registry = outgoingCall(this.registry, params);
+      return undefined;
+    } catch (error) {
+      if (error instanceof ConcurrentCallLimitError) return 'calls.error.limitReached';
+      throw error;
+    }
+  }
+
+  private async launch(entry: Entry, callId: string, uri: string): Promise<DialResult> {
+    try {
+      const dialog = this.newOutbound(entry, callId, uri, await this.deps.rtp.allocatePort());
+      this.dialogs.set(callId, dialog);
+      this.transmitInvite(dialog, dialog.invite, false);
+    } catch (error) {
+      this.dispatchCall(callId, { type: 'hangup' });
+      this.note(entry.account.id, CALL_FAILED_KEY, { level: 'warn', params: { reason: technical(error) } });
+      return fail(CALL_FAILED_KEY);
+    }
+    return { ok: true, callId };
+  }
+
+  private newOutbound(entry: Entry, callId: string, uri: string, rtpPort: number): Dialog {
+    const localTag = this.deps.ids.newTag();
+    const sdpSession = this.sessionId();
+    const address = this.hostOfEntry(entry);
+    const body = buildOffer({ address, port: rtpPort, sessionId: sdpSession, direction: 'sendrecv' });
+    const party: InviteParty = { entry, callId, target: uri, localHeader: localHeaderOf(entry, localTag) };
+    const invite = buildInvite(party, 1, this.deps.ids.newBranch(), body);
+    const remoteHeader = `<${uri}>`;
+    return this.newDialog({
+      entry, role: 'uac', callId, invite, localTag, sdpSession, remoteHeader,
+      target: uri, routes: [], direction: 'sendrecv', plan: undefined, rtpPort
+    });
+  }
+
+  private sessionId(): string {
+    return String(Math.floor(this.deps.now() / 1000));
+  }
+
+  private transmitInvite(dialog: Dialog, request: SipRequest, authenticated: boolean): void {
+    const { connection } = dialog.entry;
+    if (connection === undefined) return;
+    const send = (): void => void connection.send(request).catch(this.logSend);
+    send();
+    const stop = startInviteTimers(send, () => this.failCall(dialog), connection.candidate.transport === 'udp');
+    dialog.pending = { cseq: dialog.cseq, authenticated, request, stop };
+  }
+
+  private onInviteResponse(dialog: Dialog, response: SipResponse): void {
+    dialog.pending?.stop();
+    if (response.status < 200) return;
+    if (response.status < 300) return this.onAnswered(dialog, response);
+    this.onInviteRejected(dialog, response);
+  }
+
+  private onInviteRejected(dialog: Dialog, response: SipResponse): void {
+    const { pending } = dialog;
+    dialog.pending = undefined;
+    if (pending !== undefined) this.sendAckTo(dialog, buildFailureAck(pending.request, response));
+    if (dialog.cancelled) return void this.dialogs.delete(dialog.callId);
+    if (isChallenge(response) && pending?.authenticated === false && this.retryWithCredentials(dialog, response)) return;
+    this.failCall(dialog);
+  }
+
+  private retryWithCredentials(dialog: Dialog, response: SipResponse): boolean {
+    const credentials = this.credentialsFor(dialog, response);
+    if (credentials === undefined) return false;
+    dialog.cseq += 1;
+    const body = this.sdpFor(dialog, 'sendrecv');
+    this.transmitInvite(dialog, buildInvite(dialog, dialog.cseq, this.deps.ids.newBranch(), body, credentials), true);
+    return true;
+  }
+
+  private credentialsFor(dialog: Dialog, response: SipResponse): Credentials | undefined {
+    const proxy = response.status === 407;
+    const raw = headerValue(response.headers, proxy ? 'proxy-authenticate' : 'www-authenticate');
+    if (raw === undefined) return undefined;
+    const { username, password } = dialog.entry.account;
+    try {
+      const challenge = parseChallenge(raw);
+      const cnonce = this.deps.ids.newCnonce();
+      const value = buildAuthorization({ challenge, username, password, cnonce, hash: md5, method: 'INVITE', digestUri: dialog.target, nonceCount: 1 });
+      return { value, header: proxy ? 'proxy-authorization' : 'authorization' };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private onAnswered(dialog: Dialog, response: SipResponse): void {
+    const cseq = Number.parseInt(first(response.headers, 'cseq'), 10);
+    dialog.pending = undefined;
+    this.adoptRemote(dialog, response);
+    this.sendAckTo(dialog, buildDialogRequest(dialog, 'ACK', cseq, this.deps.ids.newBranch()));
+    const negotiated = negotiateBody(response.body);
+    if (dialog.cancelled || negotiated === undefined) return this.endAnswered(dialog);
+    dialog.plan = negotiated.plan;
+    dialog.stage = 'confirmed';
+    if (this.dispatchCall(dialog.callId, { type: 'connected' })) this.startMedia(dialog);
+  }
+
+  /** A 2xx we cannot use, or one that crossed our CANCEL: acknowledge it, then hang up at once. */
+  private endAnswered(dialog: Dialog): void {
+    if (!dialog.cancelled) {
+      this.dispatchCall(dialog.callId, { type: 'hangup' });
+      this.note(dialog.entry.account.id, CALL_FAILED_KEY, { level: 'warn' });
+    }
+    this.releaseDialog(dialog);
+    this.sendRequest(dialog, 'BYE').catch(this.logSend);
+  }
+
+  private adoptRemote(dialog: Dialog, response: SipResponse): void {
+    const contact = headerValue(response.headers, 'contact');
+    dialog.remoteHeader = first(response.headers, 'to') || dialog.remoteHeader;
+    dialog.target = contact === undefined ? dialog.target : stripBrackets(contact);
+    dialog.routes = [...headerValues(response.headers, 'record-route')].reverse();
+  }
+
+  private failCall(dialog: Dialog): void {
+    dialog.pending?.stop();
+    this.note(dialog.entry.account.id, CALL_FAILED_KEY, { level: 'warn' });
+    this.releaseDialog(dialog);
+    this.dispatchCall(dialog.callId, { type: 'remoteHangup' });
+  }
+
+  private async cancel(dialog: Dialog): Promise<void> {
+    dialog.cancelled = true;
+    const request = dialog.pending?.request;
+    dialog.pending?.stop();
+    if (request === undefined) return void this.dialogs.delete(dialog.callId);
+    const forget = setTimeout(() => this.dialogs.delete(dialog.callId), UDP_TRANSACTION_TIMEOUT_MS);
+    forget.unref();
+    await dialog.entry.connection?.send(buildCancel(request));
+  }
+
+  /** Dialog bookkeeping once a call is over: no more timers, media or lookups. */
+  private releaseDialog(dialog: Dialog): void {
+    this.dialogs.delete(dialog.callId);
+    dialog.pending?.stop();
+    this.stopMedia(dialog);
+  }
+
+  private abandon(dialog: Dialog, reason: string): void {
+    log('warn', `abandoning call ${dialog.callId}: ${reason}`);
+    this.dispatchCall(dialog.callId, { type: 'hangup' });
+    this.releaseDialog(dialog);
+    this.reply(dialog, 500, 'Server Internal Error').catch(this.logSend);
+  }
+
+  /* -------------------------------------------------------------- media */
+
+  private startMedia(dialog: Dialog): void {
+    const { plan } = dialog;
+    if (plan === undefined || dialog.media !== undefined) return;
+    try {
+      const session = this.deps.rtp.create(sessionOptions(dialog.rtpPort, plan));
+      const stopPlayback = session.onPcm((frame) => {
+        if (!dialog.held) this.deps.media.play(dialog.callId, frame);
+      });
+      this.deps.media.start(dialog.callId);
+      dialog.media = { session, stopPlayback };
+      this.applyMute(dialog);
+    } catch (error) {
+      log('warn', `media for ${dialog.callId} not started: ${String(error)}`);
+    }
+    this.emit();
+  }
+
+  private stopMedia(dialog: Dialog): void {
+    const { media } = dialog;
+    if (media === undefined) return;
+    dialog.media = undefined;
+    media.stopPlayback();
+    media.session.close();
+    this.deps.media.stop(dialog.callId);
+  }
+
+  /** Hold keeps the stream alive but silent; the user's own mute state is reported separately. */
+  private applyMute(dialog: Dialog): void {
+    dialog.media?.session.setMuted(dialog.muted || dialog.held);
+  }
+
+  /** The peer moved its media (or we learned it late): restart the session on the same local port. */
+  private adoptMedia(dialog: Dialog, body: string): void {
+    const negotiated = negotiateBody(body);
+    const { plan, media } = dialog;
+    if (negotiated === undefined || plan === undefined || media === undefined) return;
+    const moved = negotiated.plan.host !== plan.host || negotiated.plan.port !== plan.port;
+    dialog.plan = negotiated.plan;
+    if (!moved) return;
+    media.stopPlayback();
+    media.session.close();
+    dialog.media = undefined;
+    this.deps.media.stop(dialog.callId);
+    this.startMedia(dialog);
+  }
+
+  private sdpFor(dialog: Dialog, direction: SdpDirection): string {
+    return buildOffer({
+      address: this.hostOf(dialog),
+      port: dialog.rtpPort,
+      sessionId: dialog.sdpSession,
+      direction,
+      ...(dialog.plan === undefined ? {} : { payloadTypes: [dialog.plan.payloadType] })
+    });
+  }
+
+  /* ------------------------------------------------------- diagnostics */
+
+  private note(accountId: string | undefined, messageKey: string, details: Note = {}): void {
+    const diagnostics = this.deps.diagnostics;
+    const stored = diagnostics.append({
+      level: details.level ?? 'info',
+      messageKey,
+      ...(accountId === undefined ? {} : { accountId }),
+      ...(details.params === undefined ? {} : { params: details.params }),
+      ...(details.raw === undefined ? {} : { raw: details.raw })
+    });
+    if (stored !== undefined) this.emit();
+  }
+
+  private traceSent(entry: Entry, message: SipMessage): void {
+    const method = isResponse(message) ? String(message.status) : message.method;
+    this.traceWire(entry, 'logs.event.sent', { method }, message);
+  }
+
+  private traceReceived(entry: Entry, message: SipMessage): void {
+    const status = isResponse(message) ? String(message.status) : message.method;
+    this.traceWire(entry, 'logs.event.received', { status }, message);
+  }
+
+  private traceWire(entry: Entry, key: string, params: Record<string, string>, message: SipMessage): void {
+    if (!this.deps.diagnostics.debug) return;
+    this.note(entry.account.id, key, { level: 'debug', params, raw: serialize(message) });
+  }
+
+  private instrument(entry: Entry, connection: SipConnection): void {
+    const send = connection.send.bind(connection);
+    connection.send = (message): Promise<void> => {
+      this.traceSent(entry, message);
+      return send(message);
+    };
   }
 
   /* ------------------------------------------------------- registration */
@@ -312,14 +836,26 @@ export class SipEngine {
     try {
       const { domain, serverUri } = entry.account;
       const params = serverUri === undefined ? { domain } : { domain, manualUri: serverUri };
-      const { candidate } = await discoverTransport(params, this.deps.probe);
+      const { candidate } = await discoverTransport(params, this.loggedProbes(entry));
       if (entry.stopped) return;
       entry.candidate = candidate;
-      this.emit();
+      this.note(entry.account.id, 'logs.event.transport', { params: { transport: candidate.transport } });
       await this.attach(entry, await this.deps.open(candidate));
     } catch (error) {
       this.fail(entry, this.failureKey(error), true);
     }
+  }
+
+  private loggedProbes(entry: Entry): ProbeDeps {
+    const probes = this.deps.probe;
+    return {
+      ...probes,
+      probe: (candidate, timeoutMs): Promise<number> => {
+        const params = { transport: candidate.transport, host: candidate.host };
+        this.note(entry.account.id, 'logs.event.probe', { params });
+        return probes.probe(candidate, timeoutMs);
+      }
+    };
   }
 
   private failureKey(error: unknown): string {
@@ -334,6 +870,7 @@ export class SipEngine {
       return;
     }
     entry.connection = connection;
+    this.instrument(entry, connection);
     connection.onMessage((message) => this.onMessage(entry, message));
     connection.onClose((reason) => this.onClosed(entry, connection, reason));
     await this.refresh(entry);
@@ -343,12 +880,20 @@ export class SipEngine {
     const { connection, candidate, account } = entry;
     if (connection === undefined || candidate === undefined) return;
     const params = { account, candidate, expires: account.registerExpires };
+    const known = connection.publicAddress;
     const result = await register(params, { connection, ids: this.deps.ids, hash: md5 });
     if (entry.stopped || entry.connection !== connection) return;
+    this.noteMappedAddress(entry, known, connection.publicAddress);
     if (!result.ok) return this.fail(entry, result.errorKey, result.status === 408);
+    this.note(account.id, 'logs.event.registered', { params: { expires: String(result.expiresIn) } });
     if (entry.snapshot.state === 'registering') this.dispatchRegistration(entry, { type: 'registered' });
     const delay = Math.max(MIN_REFRESH_MS, Math.floor(result.expiresIn * REFRESH_FRACTION * 1000));
     entry.timer = setTimeout(() => void this.refresh(entry), delay);
+  }
+
+  private noteMappedAddress(entry: Entry, before: SipConnection['publicAddress'], after: SipConnection['publicAddress']): void {
+    if (after === undefined || (before?.host === after.host && before.port === after.port)) return;
+    this.note(entry.account.id, 'logs.event.nat', { params: { address: `${after.host}:${after.port}` } });
   }
 
   private fail(entry: Entry, reason: string, retryable: boolean): void {
@@ -357,6 +902,7 @@ export class SipEngine {
     this.dropConnection(entry);
     this.dispatchRegistration(entry, { type: 'failed', reason });
     if (retryable && canRetry(entry.snapshot, MAX_RETRIES)) {
+      this.note(entry.account.id, 'logs.event.retry', { params: { seconds: String(RETRY_DELAY_MS / 1000) } });
       entry.timer = setTimeout(() => this.retry(entry), RETRY_DELAY_MS);
     }
   }
@@ -377,7 +923,8 @@ export class SipEngine {
     const { connection, candidate, account } = entry;
     if (connection === undefined || candidate === undefined || entry.snapshot.state !== 'registered') return;
     const deps = { connection, ids: this.deps.ids, hash: md5, timeoutMs: UNREGISTER_TIMEOUT_MS };
-    await register({ account, candidate, expires: 0 }, deps);
+    const result = await register({ account, candidate, expires: 0 }, deps);
+    if (result.ok) this.note(account.id, 'logs.event.unregistered');
   }
 
   private dropConnection(entry: Entry): void {
@@ -395,27 +942,45 @@ export class SipEngine {
   private dispatchRegistration(entry: Entry, event: RegistrationEvent): void {
     try {
       entry.snapshot = reduceRegistration(entry.snapshot, event);
+      this.noteRegistration(entry, event);
     } catch (error) {
       log('warn', `registration ${event.type} ignored: ${String(error)}`);
     }
     this.emit();
   }
 
+  private noteRegistration(entry: Entry, event: RegistrationEvent): void {
+    const { account } = entry;
+    if (event.type === 'register' || event.type === 'retry') {
+      this.note(account.id, 'logs.event.registering', { params: { account: `${account.username}@${account.domain}` } });
+    } else if (event.type === 'failed') {
+      this.note(account.id, 'logs.event.failed', { level: 'warn', params: { reason: event.reason } });
+    }
+  }
+
   /* ------------------------------------------------------------ inbound */
 
   private onMessage(entry: Entry, message: SipRequest | SipResponse): void {
     if (entry.stopped) return;
+    this.traceReceived(entry, message);
     if (isResponse(message)) this.onResponse(entry, message);
     else this.onRequest(entry, message);
   }
 
   private onResponse(entry: Entry, response: SipResponse): void {
-    const callId = first(response.headers, 'call-id');
-    const dialog = this.dialogs.get(callId);
-    const cseq = first(response.headers, 'cseq');
-    if (dialog === undefined || !cseq.endsWith(' INVITE') || response.status < 200 || response.status > 299) return;
-    void this.sendAck(dialog, Number.parseInt(cseq, 10)).catch((e: unknown) => log('warn', `ack: ${String(e)}`));
-    log('info', `re-INVITE accepted for ${entry.account.id}`);
+    if (isChallenge(response)) this.note(entry.account.id, 'logs.event.challenged');
+    const dialog = this.dialogs.get(first(response.headers, 'call-id'));
+    const cseq = inviteCseq(response);
+    if (dialog === undefined || cseq === undefined) return;
+    if (dialog.pending?.cseq === cseq) this.onInviteResponse(dialog, response);
+    else if (response.status >= 200 && response.status < 300) this.onReinviteAnswered(dialog, response, cseq);
+  }
+
+  /** Also covers a retransmitted 2xx to the original INVITE, which must be acknowledged again. */
+  private onReinviteAnswered(dialog: Dialog, response: SipResponse, cseq: number): void {
+    this.sendAckTo(dialog, buildDialogRequest(dialog, 'ACK', cseq, this.deps.ids.newBranch()));
+    if (response.body !== '') this.adoptMedia(dialog, response.body);
+    log('info', `re-INVITE accepted for ${dialog.entry.account.id}`);
   }
 
   private onRequest(entry: Entry, request: SipRequest): void {
@@ -431,29 +996,75 @@ export class SipEngine {
   }
 
   private onInvite(entry: Entry, request: SipRequest): void {
+    const known = this.dialogs.get(first(request.headers, 'call-id'));
+    if (known !== undefined) return this.onKnownInvite(known, request);
+    const negotiated = negotiateBody(request.body);
+    if (negotiated === undefined) return this.respond(entry, request, 488, 'Not Acceptable Here');
+    this.acceptInvite(entry, request, negotiated);
+  }
+
+  private acceptInvite(entry: Entry, request: SipRequest, negotiated: Negotiated): void {
     const callId = first(request.headers, 'call-id');
-    const known = this.dialogs.get(callId);
-    if (known !== undefined) {
-      this.reply(known, 200, 'OK', buildSdp(this.hostOf(known), 'sendrecv')).catch(this.logSend);
-      return;
-    }
     try {
       const remoteIdentity = identityOf(first(request.headers, 'from'));
       this.registry = incomingCall(this.registry, { id: callId, accountId: entry.account.id, remoteIdentity });
     } catch (error) {
       log('warn', `rejecting incoming call: ${String(error)}`);
-      this.respond(entry, request, 486, 'Busy Here');
-      return;
+      return this.respond(entry, request, 486, 'Busy Here');
     }
-    const dialog: Dialog = { entry, invite: request, toTag: this.deps.ids.newTag(), cseq: 1 };
+    const dialog = this.newInbound(entry, request, negotiated);
     this.dialogs.set(callId, dialog);
     this.reply(dialog, 180, 'Ringing').catch(this.logSend);
     this.emit();
   }
 
+  private newInbound(entry: Entry, request: SipRequest, negotiated: Negotiated): Dialog {
+    const from = first(request.headers, 'from');
+    const contact = headerValue(request.headers, 'contact');
+    return this.newDialog({
+      entry,
+      role: 'uas',
+      callId: first(request.headers, 'call-id'),
+      invite: request,
+      localTag: this.deps.ids.newTag(),
+      sdpSession: this.sessionId(),
+      remoteHeader: from,
+      target: contact === undefined ? uriOf(from) : stripBrackets(contact),
+      routes: headerValues(request.headers, 'record-route'),
+      direction: negotiated.direction,
+      plan: negotiated.plan,
+      rtpPort: 0
+    });
+  }
+
+  /** A retransmission of the INVITE gets our last answer again; a higher CSeq is a re-INVITE. */
+  private onKnownInvite(dialog: Dialog, request: SipRequest): void {
+    const cseq = Number.parseInt(first(request.headers, 'cseq'), 10);
+    if (cseq <= dialog.cseq || dialog.stage === 'early') {
+      this.resendProvisionalOrFinal(dialog);
+      return;
+    }
+    const negotiated = negotiateBody(request.body);
+    if (negotiated === undefined) {
+      this.reply(dialog, 488, 'Not Acceptable Here').catch(this.logSend);
+      return;
+    }
+    this.adoptMedia(dialog, request.body);
+    this.reply(dialog, 200, 'OK', this.sdpFor(dialog, negotiated.direction)).catch(this.logSend);
+  }
+
+  private resendProvisionalOrFinal(dialog: Dialog): void {
+    const answered = dialog.stage !== 'early';
+    const send = answered ? this.reply(dialog, 200, 'OK', this.sdpFor(dialog, dialog.direction)) : this.reply(dialog, 180, 'Ringing');
+    send.catch(this.logSend);
+  }
+
   private onAck(request: SipRequest): void {
-    const callId = first(request.headers, 'call-id');
-    if (this.registry[callId]?.state === 'connecting') this.dispatchCall(callId, { type: 'connected' });
+    const dialog = this.dialogs.get(first(request.headers, 'call-id'));
+    if (dialog === undefined || this.registry[dialog.callId]?.state !== 'connecting') return;
+    if (!this.dispatchCall(dialog.callId, { type: 'connected' })) return;
+    dialog.stage = 'confirmed';
+    this.startMedia(dialog);
   }
 
   private onBye(entry: Entry, request: SipRequest): void {
@@ -473,7 +1084,8 @@ export class SipEngine {
   }
 
   private endRemote(callId: string): void {
-    this.dialogs.delete(callId);
+    const dialog = this.dialogs.get(callId);
+    if (dialog !== undefined) this.releaseDialog(dialog);
     this.dispatchCall(callId, { type: 'remoteHangup' });
   }
 
@@ -487,6 +1099,21 @@ export class SipEngine {
 
   private readonly logSend = (error: unknown): void => log('warn', `send failed: ${String(error)}`);
 
+  private newDialog(base: DialogBase): Dialog {
+    return {
+      ...base,
+      localHeader: localHeaderOf(base.entry, base.localTag),
+      cseq: 1,
+      stage: 'early',
+      media: undefined,
+      pending: undefined,
+      held: false,
+      muted: false,
+      cancelled: false,
+      connectedAt: undefined
+    };
+  }
+
   private respond(entry: Entry, request: SipRequest, status: number, reason: string): void {
     const reply = buildReply(request, status, reason, { toTag: this.deps.ids.newTag() });
     entry.connection?.send(reply).catch(this.logSend);
@@ -497,7 +1124,7 @@ export class SipEngine {
     if (connection === undefined) return;
     const contact = status < 300 ? contactFor(dialog.entry, connection) : undefined;
     const options: ReplyOptions = {
-      toTag: dialog.toTag,
+      toTag: dialog.localTag,
       ...(contact === undefined ? {} : { contact }),
       ...(body === undefined ? {} : { body })
     };
@@ -506,17 +1133,20 @@ export class SipEngine {
 
   private async sendRequest(dialog: Dialog, method: string, body?: string): Promise<void> {
     dialog.cseq += 1;
-    const request = buildDialogRequest(dialog, method, dialog.cseq, this.deps.ids, body);
+    const request = buildDialogRequest(dialog, method, dialog.cseq, this.deps.ids.newBranch(), body);
     await dialog.entry.connection?.send(request);
   }
 
-  private async sendAck(dialog: Dialog, cseq: number): Promise<void> {
-    await dialog.entry.connection?.send(buildDialogRequest(dialog, 'ACK', cseq, this.deps.ids));
+  private sendAckTo(dialog: Dialog, request: SipRequest): void {
+    dialog.entry.connection?.send(request).catch(this.logSend);
   }
 
   private hostOf(dialog: Dialog): string {
-    const connection = dialog.entry.connection;
-    return connection === undefined ? '0.0.0.0' : reachableAt(connection).host;
+    return this.hostOfEntry(dialog.entry);
+  }
+
+  private hostOfEntry(entry: Entry): string {
+    return entry.connection === undefined ? '0.0.0.0' : reachableAt(entry.connection).host;
   }
 
   private requireDialog(callId: string): Dialog {
@@ -528,6 +1158,7 @@ export class SipEngine {
   private dispatchCall(callId: string, event: CallEvent): boolean {
     try {
       this.registry = applyCallEvent(this.registry, callId, event);
+      this.markConnected(callId);
       return true;
     } catch (error) {
       log('warn', `call ${event.type} ignored: ${String(error)}`);
@@ -537,7 +1168,18 @@ export class SipEngine {
     }
   }
 
+  private markConnected(callId: string): void {
+    const dialog = this.dialogs.get(callId);
+    if (dialog !== undefined && dialog.connectedAt === undefined && this.registry[callId]?.state === 'active') {
+      dialog.connectedAt = this.deps.now();
+    }
+  }
+
   private emit(): void {
     for (const listener of this.listeners) listener();
   }
+}
+
+function uriOf(header: string): string {
+  return stripBrackets(header.split(';')[0] ?? header);
 }

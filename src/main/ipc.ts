@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { createDiagnosticsLog } from '@core/diagnostics';
 import { isSupportedLocale, resolveLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
 import { parseEnvAccounts } from '@core/config/env-accounts';
@@ -14,11 +15,17 @@ import {
   validateAccountInput
 } from '@core/sip';
 import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
-import { IPC } from '../shared/api';
-import type { AccountDraft, AccountView, AppSnapshot, SaveAccountResult } from '../shared/api';
+import { IPC, isDtmfDigit } from '../shared/api';
+import type { AccountDraft, AccountView, AppSnapshot, DialResult, SaveAccountResult } from '../shared/api';
 import { loadState, saveState } from './account-storage';
+import { createMediaBridge } from './media';
 import { SipEngine } from './sip/engine';
-import { log } from './windows';
+import { electronMediaDeps, isMediaWebContents, log } from './windows';
+
+/** At most one snapshot per ~two animation frames, however many log lines or call events arrive. */
+const BROADCAST_INTERVAL_MS = 33;
+/** Live packet counters change continuously; the UI only needs them about once a second. */
+const STATS_INTERVAL_MS = 1_000;
 
 const DUPLICATE_ISSUE: ValidationIssue = {
   field: 'username',
@@ -26,9 +33,14 @@ const DUPLICATE_ISSUE: ValidationIssue = {
 };
 
 class Controller {
-  readonly engine = new SipEngine();
+  /** The one diagnostics log of the app; the engine writes to it, snapshots read from it. */
+  readonly diagnostics = createDiagnosticsLog();
+  readonly media = createMediaBridge(electronMediaDeps());
+  readonly engine = new SipEngine({ diagnostics: this.diagnostics, media: this.media });
   store: AccountStoreState = emptyAccountStore;
   locale: Locale = resolveLocale(app.getLocale());
+  private cooling = false;
+  private dirty = false;
 
   snapshot(): AppSnapshot {
     const registrations = this.engine.getRegistrations();
@@ -41,18 +53,64 @@ class Controller {
         ...(transport === undefined ? {} : { transport })
       };
     });
-    return { accounts, calls: this.engine.getCalls(), locale: this.locale };
+    return {
+      accounts,
+      calls: this.engine.getCallViews(),
+      locale: this.locale,
+      logs: this.diagnostics.entries(),
+      debugLogging: this.diagnostics.debug
+    };
   }
 
+  /**
+   * Leading-edge throttle: the first change goes out immediately, the rest of
+   * a burst collapses into one more snapshot when the cooldown ends.
+   */
   broadcast(): void {
-    const snapshot = this.snapshot();
+    if (this.cooling) {
+      this.dirty = true;
+      return;
+    }
+    this.send(this.snapshot());
+    this.cooling = true;
+    setTimeout(() => this.cooldown(), BROADCAST_INTERVAL_MS);
+  }
+
+  private cooldown(): void {
+    this.cooling = false;
+    if (!this.dirty) return;
+    this.dirty = false;
+    this.broadcast();
+  }
+
+  private send(snapshot: AppSnapshot): void {
     for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send(IPC.subscribe, snapshot);
+      if (!isMediaWebContents(window.webContents)) window.webContents.send(IPC.subscribe, snapshot);
     }
   }
 
+  /** Keeps the packet counters on screen moving while a call has media. */
+  startStatsTicker(): void {
+    const ticker = setInterval(() => {
+      if (this.engine.getCallViews().some((view) => view.media !== undefined)) this.broadcast();
+    }, STATS_INTERVAL_MS);
+    ticker.unref();
+  }
+
   async persist(): Promise<void> {
-    await saveState({ accounts: this.store, locale: this.locale });
+    await saveState({ accounts: this.store, locale: this.locale, debugLogging: this.diagnostics.debug });
+  }
+
+  async setDebugLogging(enabled: boolean): Promise<boolean> {
+    this.diagnostics.setDebug(enabled);
+    await this.persist();
+    this.broadcast();
+    return this.diagnostics.debug;
+  }
+
+  clearLogs(): void {
+    this.diagnostics.clear();
+    this.broadcast();
   }
 
   isDuplicate(input: SipAccountInput, ownId: AccountId | undefined): boolean {
@@ -112,6 +170,27 @@ function removeIfPresent(store: AccountStoreState, id: AccountId): AccountStoreS
 
 type CallAction = (callId: string) => Promise<void>;
 
+const INVALID_TARGET: DialResult = { ok: false, errorKey: 'calls.error.invalidTarget' };
+
+/** The renderer is not trusted to send well-typed arguments, least of all bytes destined for an RTP stream. */
+function registerMediaHandlers(controller: Controller): void {
+  const { engine } = controller;
+  ipcMain.handle(IPC.dial, (_event, accountId: unknown, target: unknown): Promise<DialResult> | DialResult =>
+    typeof accountId === 'string' && typeof target === 'string' ? engine.dial(accountId, target) : INVALID_TARGET
+  );
+  ipcMain.handle(IPC.sendDtmf, (_event, callId: unknown, digit: unknown): void => {
+    if (typeof callId === 'string' && isDtmfDigit(digit)) engine.sendDtmf(callId, digit);
+  });
+  ipcMain.handle(IPC.setMuted, (_event, callId: unknown, muted: unknown): void => {
+    if (typeof callId === 'string' && typeof muted === 'boolean') engine.setMuted(callId, muted);
+  });
+}
+
+function registerLogHandlers(controller: Controller): void {
+  ipcMain.handle(IPC.setDebugLogging, (_event, enabled: unknown) => controller.setDebugLogging(enabled === true));
+  ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
+}
+
 function registerCallHandlers(controller: Controller): void {
   const { engine } = controller;
   const actions: readonly (readonly [string, CallAction])[] = [
@@ -133,6 +212,8 @@ function registerHandlers(controller: Controller): void {
   ipcMain.handle(IPC.getLocale, () => controller.locale);
   ipcMain.handle(IPC.setLocale, (_event, locale: Locale) => controller.setLocale(locale));
   registerCallHandlers(controller);
+  registerMediaHandlers(controller);
+  registerLogHandlers(controller);
 }
 
 export async function registerIpc(): Promise<void> {
@@ -140,12 +221,17 @@ export async function registerIpc(): Promise<void> {
   const persisted = await loadState();
   controller.store = persisted.accounts;
   if (persisted.locale !== undefined) controller.locale = persisted.locale;
+  controller.diagnostics.setDebug(persisted.debugLogging === true);
   controller.seed();
   await controller.persist();
   controller.engine.onChange(() => controller.broadcast());
   registerHandlers(controller);
+  controller.startStatsTicker();
   app.on('before-quit', () => {
-    controller.engine.stop().catch((error: unknown) => log('warn', `engine stop: ${String(error)}`));
+    controller.engine
+      .stop()
+      .catch((error: unknown) => log('warn', `engine stop: ${String(error)}`))
+      .finally(() => controller.media.dispose());
   });
   await controller.engine.start(listAccounts(controller.store));
 }
