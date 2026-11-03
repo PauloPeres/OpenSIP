@@ -179,7 +179,7 @@ export function buildOptionsProbe(host: string, localPort: number, branch: strin
   ].join('\r\n');
 }
 
-export const PROBE_USER_AGENT = 'OpenSIP/0.1.0';
+export const PROBE_USER_AGENT = 'OpenSIPPhone/0.1.0';
 
 const probeBranch = (): string => `z9hG4bK${randomBytes(6).toString('hex')}`;
 

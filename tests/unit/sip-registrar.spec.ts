@@ -98,7 +98,7 @@ describe('buildRegisterRequest', () => {
         'CSeq: 1 REGISTER',
         'Contact: <sip:1001@10.0.0.5:51234;transport=tcp>',
         'Expires: 600',
-        'User-Agent: OpenSIP/0.1.0',
+        'User-Agent: OpenSIPPhone/0.1.0',
         'Allow: INVITE, ACK, CANCEL, BYE, OPTIONS',
         'Content-Length: 0',
         '',

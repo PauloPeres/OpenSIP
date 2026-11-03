@@ -59,7 +59,7 @@ export type RegisterResult =
 type AuthHeaderName = 'authorization' | 'proxy-authorization';
 
 export const MAX_AUTH_ATTEMPTS = 3;
-export const USER_AGENT = 'OpenSIP/0.1.0';
+export const USER_AGENT = 'OpenSIPPhone/0.1.0';
 const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const STATUS_TIMEOUT = 408;

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Free and open source multi-account SIP softphone",
   "license": "MIT",
-  "author": "OpenSIP Contributors",
+  "author": "Open SIP Phone Contributors",
   "private": false,
   "main": "out/main/index.js",
   "type": "module",

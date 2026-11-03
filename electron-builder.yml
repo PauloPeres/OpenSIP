@@ -20,7 +20,7 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
-    NSMicrophoneUsageDescription: OpenSIP uses the microphone so the other person can hear you during calls.
+    NSMicrophoneUsageDescription: Open SIP Phone uses the microphone so the other person can hear you during calls.
   target:
     - target: dmg
       arch: [x64, arm64]
