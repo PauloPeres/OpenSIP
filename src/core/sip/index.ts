@@ -4,3 +4,5 @@ export * from './account-store';
 export * from './registration';
 export * from './call';
 export * from './transport';
+export * from './message';
+export * from './digest';
