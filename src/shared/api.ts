@@ -5,6 +5,7 @@ import type {
   RegistrationSnapshot,
   SipAccount,
   SipAccountInput,
+  SipTransport,
   ValidationIssue
 } from '@core/sip';
 
@@ -26,6 +27,8 @@ export const IPC = {
 export interface AccountView {
   readonly account: SipAccount;
   readonly registration: RegistrationSnapshot;
+  /** The transport discovered (or configured) for this account, once known. */
+  readonly transport?: SipTransport;
 }
 
 export interface AppSnapshot {

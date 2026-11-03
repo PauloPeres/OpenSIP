@@ -27,8 +27,7 @@
     "verify": "npm run typecheck && npm run lint && npm run gate:i18n && npm run test:coverage && npm run test:bdd && npm run gate:crap && npm run gate:dry"
   },
   "dependencies": {
-    "electron-updater": "6.3.9",
-    "sip.js": "0.21.2"
+    "electron-updater": "6.3.9"
   },
   "devDependencies": {
     "@cucumber/cucumber": "11.1.1",

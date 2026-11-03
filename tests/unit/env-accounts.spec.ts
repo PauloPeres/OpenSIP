@@ -6,7 +6,7 @@ const full = (n: number, extra: Record<string, string> = {}): Record<string, str
   [`OPENSIP_ACCOUNT_${n}_USERNAME`]: `100${n}`,
   [`OPENSIP_ACCOUNT_${n}_PASSWORD`]: `pw${n}`,
   [`OPENSIP_ACCOUNT_${n}_DOMAIN`]: 'sip.example.com',
-  [`OPENSIP_ACCOUNT_${n}_WS_SERVER`]: 'wss://sip.example.com:7443',
+  [`OPENSIP_ACCOUNT_${n}_SERVER_URI`]: 'wss://sip.example.com:7443',
   ...extra
 });
 
@@ -28,7 +28,7 @@ describe('parseEnvAccounts', () => {
         username: '1001',
         password: 'pw1',
         domain: 'sip.example.com',
-        wsServer: 'wss://sip.example.com:7443',
+        serverUri: 'wss://sip.example.com:7443',
         registerExpires: 600
       }
     });
@@ -66,14 +66,49 @@ describe('parseEnvAccounts', () => {
     expect(parseEnvAccounts(env)[0]?.input.displayName).toBe('1001');
   });
 
-  it.each(['USERNAME', 'PASSWORD', 'DOMAIN', 'WS_SERVER'])('skips an entry with blank %s', (field) => {
+  it.each(['USERNAME', 'PASSWORD', 'DOMAIN'])('skips an entry with blank %s', (field) => {
     expect(parseEnvAccounts(full(1, { [`OPENSIP_ACCOUNT_1_${field}`]: '  ' }))).toEqual([]);
   });
 
-  it.each(['USERNAME', 'PASSWORD', 'DOMAIN', 'WS_SERVER'])('skips an entry with missing %s', (field) => {
+  it.each(['USERNAME', 'PASSWORD', 'DOMAIN'])('skips an entry with missing %s', (field) => {
     const env: Record<string, string | undefined> = full(1);
     env[`OPENSIP_ACCOUNT_1_${field}`] = undefined;
     expect(parseEnvAccounts(env)).toEqual([]);
+  });
+
+  it.each(['SERVER_URI', 'WS_SERVER'])('omits serverUri when %s is absent or blank', (name) => {
+    const env: Record<string, string | undefined> = full(1, { [`OPENSIP_ACCOUNT_1_${name}`]: '   ' });
+    delete env['OPENSIP_ACCOUNT_1_SERVER_URI'];
+    delete env['OPENSIP_ACCOUNT_1_WS_SERVER'];
+    expect(parseEnvAccounts(env)[0]?.input).not.toHaveProperty('serverUri');
+  });
+
+  it('accepts the legacy WS_SERVER alias', () => {
+    const env: Record<string, string | undefined> = full(1);
+    delete env['OPENSIP_ACCOUNT_1_SERVER_URI'];
+    env['OPENSIP_ACCOUNT_1_WS_SERVER'] = 'ws://legacy:80';
+    expect(parseEnvAccounts(env)[0]?.input.serverUri).toBe('ws://legacy:80');
+  });
+
+  it('prefers SERVER_URI over the legacy WS_SERVER alias', () => {
+    const [draft] = parseEnvAccounts(full(1, { OPENSIP_ACCOUNT_1_WS_SERVER: 'ws://legacy:80' }));
+    expect(draft?.input.serverUri).toBe('wss://sip.example.com:7443');
+  });
+
+  it('falls back to WS_SERVER when SERVER_URI is blank', () => {
+    const [draft] = parseEnvAccounts(
+      full(1, { OPENSIP_ACCOUNT_1_SERVER_URI: ' ', OPENSIP_ACCOUNT_1_WS_SERVER: 'ws://legacy:80' })
+    );
+    expect(draft?.input.serverUri).toBe('ws://legacy:80');
+  });
+
+  it('seeds an entry that has only username, password and domain', () => {
+    const [draft] = parseEnvAccounts({
+      OPENSIP_ACCOUNT_2_USERNAME: 'u',
+      OPENSIP_ACCOUNT_2_PASSWORD: 'p',
+      OPENSIP_ACCOUNT_2_DOMAIN: 'pbx.local'
+    });
+    expect(draft?.input).toEqual({ displayName: 'u', username: 'u', password: 'p', domain: 'pbx.local' });
   });
 
   it('trims values', () => {

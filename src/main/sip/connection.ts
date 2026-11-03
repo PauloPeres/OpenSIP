@@ -1,0 +1,201 @@
+import { createSocket } from 'node:dgram';
+import { connect as netConnect } from 'node:net';
+import type { Socket } from 'node:net';
+import { connect as tlsConnect } from 'node:tls';
+import { extractMessages, parse, serialize } from '@core/sip';
+import type { SipMessage, SipTransport, TransportCandidate } from '@core/sip';
+
+export interface SipConnection {
+  send(message: SipMessage): Promise<void>;
+  onMessage(listener: (message: SipMessage) => void): () => void;
+  onClose(listener: (reason: string) => void): () => void;
+  close(): void;
+  readonly candidate: TransportCandidate;
+  readonly localAddress: { host: string; port: number };
+  /** NAT-mapped address learned from `received`/`rport` on a response's top Via (RFC 3581). */
+  publicAddress?: { host: string; port: number };
+}
+
+export interface WebSocketLike {
+  onopen: (() => void) | null;
+  onclose: (() => void) | null;
+  onerror: (() => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  send(data: string): void;
+  close(): void;
+}
+
+export interface ConnectionDeps {
+  readonly connectTimeoutMs?: number;
+  /** Defaults to the runtime's global WebSocket, which Electron 33 (Node 20) does not provide. */
+  readonly webSocket?: (new (url: string, protocols?: string | string[]) => WebSocketLike) | undefined;
+}
+
+/** A peer that never completes a message must not grow memory without bound. */
+export const MAX_BUFFER_BYTES = 64 * 1024;
+const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
+const WS_LOCAL: { host: string; port: number } = { host: 'opensip.invalid', port: 5060 };
+
+interface Hub {
+  readonly emit: (message: SipMessage) => void;
+  readonly end: (reason: string) => void;
+  readonly onMessage: SipConnection['onMessage'];
+  readonly onClose: SipConnection['onClose'];
+}
+
+function createHub(): Hub {
+  const messages = new Set<(message: SipMessage) => void>();
+  const closers = new Set<(reason: string) => void>();
+  const state = { ended: false };
+  const subscribe = <T>(set: Set<T>, listener: T): (() => void) => {
+    set.add(listener);
+    return () => set.delete(listener);
+  };
+  return {
+    emit: (message) => messages.forEach((listener) => listener(message)),
+    end: (reason): void => {
+      if (state.ended) return;
+      state.ended = true;
+      closers.forEach((listener) => listener(reason));
+    },
+    onMessage: (listener) => subscribe(messages, listener),
+    onClose: (listener) => subscribe(closers, listener)
+  };
+}
+
+interface Io {
+  readonly write: (text: string) => Promise<void>;
+  readonly destroy: () => void;
+}
+
+function assemble(
+  candidate: TransportCandidate,
+  localAddress: SipConnection['localAddress'],
+  hub: Hub,
+  io: Io
+): SipConnection {
+  return {
+    candidate,
+    localAddress,
+    onMessage: hub.onMessage,
+    onClose: hub.onClose,
+    send: (message) => io.write(serialize(message)),
+    close: (): void => {
+      io.destroy();
+      hub.end('closed');
+    }
+  };
+}
+
+function ingest(buffer: string, hub: Hub, socket: Socket): string {
+  try {
+    const { messages, rest } = extractMessages(buffer);
+    messages.forEach(hub.emit);
+    if (rest.length <= MAX_BUFFER_BYTES) return rest;
+    hub.end('buffer-overflow');
+  } catch {
+    hub.end('malformed-message');
+  }
+  socket.destroy();
+  return '';
+}
+
+const reasonOf = (error: Error): string => (error as { code?: string }).code ?? error.message;
+
+function wireStream(candidate: TransportCandidate, socket: Socket): SipConnection {
+  const hub = createHub();
+  const state = { buffer: '' };
+  socket.setEncoding('utf8');
+  socket.on('data', (chunk: string) => {
+    state.buffer = ingest(state.buffer + chunk, hub, socket);
+  });
+  socket.on('error', (error) => hub.end(reasonOf(error)));
+  socket.on('close', () => hub.end('closed'));
+  const local = { host: socket.localAddress ?? '0.0.0.0', port: socket.localPort ?? 0 };
+  const write = (text: string): Promise<void> =>
+    new Promise((resolve, reject) => socket.write(text, (error) => (error ? reject(error) : resolve())));
+  return assemble(candidate, local, hub, { write, destroy: () => socket.destroy() });
+}
+
+function whenReady(socket: Socket, readyEvent: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    socket.setTimeout(timeoutMs, () => socket.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    socket.once('error', reject);
+    socket.once(readyEvent, () => {
+      socket.setTimeout(0);
+      socket.removeListener('error', reject);
+      resolve();
+    });
+  });
+}
+
+async function openStream(
+  candidate: TransportCandidate,
+  deps: ConnectionDeps
+): Promise<SipConnection> {
+  const { host, port } = candidate;
+  const secure = candidate.transport === 'tls';
+  const socket = secure ? tlsConnect({ host, port, servername: host }) : netConnect({ host, port });
+  await whenReady(socket, secure ? 'secureConnect' : 'connect', deps.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+  return wireStream(candidate, socket);
+}
+
+function parseDatagram(data: Buffer, hub: Hub): void {
+  try {
+    hub.emit(parse(data.toString('utf8')));
+  } catch {
+    // A malformed datagram is dropped: UDP is lossy by nature.
+  }
+}
+
+async function openDatagram(candidate: TransportCandidate): Promise<SipConnection> {
+  const socket = createSocket('udp4');
+  const hub = createHub();
+  socket.on('message', (data) => parseDatagram(data, hub));
+  socket.on('error', (error) => hub.end(reasonOf(error)));
+  socket.on('close', () => hub.end('closed'));
+  await new Promise<void>((resolve) => socket.connect(candidate.port, candidate.host, resolve));
+  const { address, port } = socket.address();
+  const write = (text: string): Promise<void> =>
+    new Promise((resolve, reject) => socket.send(text, (error) => (error ? reject(error) : resolve())));
+  return assemble(candidate, { host: address, port }, hub, { write, destroy: () => socket.close() });
+}
+
+function wireWebSocket(candidate: TransportCandidate, socket: WebSocketLike): SipConnection {
+  const hub = createHub();
+  socket.onmessage = (event): void => {
+    if (typeof event.data === 'string') parseDatagram(Buffer.from(event.data), hub);
+  };
+  socket.onclose = (): void => hub.end('closed');
+  socket.onerror = (): void => hub.end('websocket-error');
+  const write = async (text: string): Promise<void> => socket.send(text);
+  return assemble(candidate, WS_LOCAL, hub, { write, destroy: () => socket.close() });
+}
+
+function openWebSocket(candidate: TransportCandidate, deps: ConnectionDeps): Promise<SipConnection> {
+  const Ctor = deps.webSocket ?? (globalThis as { WebSocket?: ConnectionDeps['webSocket'] }).WebSocket;
+  if (Ctor === undefined) return Promise.reject(new Error('websocket-unavailable'));
+  const scheme = candidate.transport === 'wss' ? 'wss' : 'ws';
+  const socket = new Ctor(`${scheme}://${candidate.host}:${candidate.port}`, 'sip');
+  return new Promise((resolve, reject) => {
+    socket.onerror = (): void => reject(new Error('websocket-error'));
+    socket.onopen = (): void => resolve(wireWebSocket(candidate, socket));
+  });
+}
+
+type Opener = (candidate: TransportCandidate, deps: ConnectionDeps) => Promise<SipConnection>;
+
+const OPENERS: Readonly<Record<SipTransport, Opener>> = {
+  tcp: openStream,
+  tls: openStream,
+  udp: (candidate) => openDatagram(candidate),
+  ws: openWebSocket,
+  wss: openWebSocket
+};
+
+export function openConnection(
+  candidate: TransportCandidate,
+  deps: ConnectionDeps = {}
+): Promise<SipConnection> {
+  return OPENERS[candidate.transport](candidate, deps);
+}

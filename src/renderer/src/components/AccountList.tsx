@@ -1,6 +1,6 @@
 import type { AccountView } from '../../../shared/api';
 import type { SipAccount } from '@core/sip';
-import { registrationStateKey } from '@core/sip';
+import { registrationStateKey, transportLabelKey } from '@core/sip';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import { ActionButton, StatusBadge } from './StatusBadge';
 
@@ -12,7 +12,7 @@ interface AccountListProps {
 
 function AccountRow({ view, onEdit, onRemove }: Omit<AccountListProps, 'accounts'> & { readonly view: AccountView }): JSX.Element {
   const { t } = useTranslation();
-  const { account, registration } = view;
+  const { account, registration, transport } = view;
   return (
     <li className="card row">
       <div className="grow">
@@ -20,6 +20,9 @@ function AccountRow({ view, onEdit, onRemove }: Omit<AccountListProps, 'accounts
         <div className="muted">{account.uri}</div>
       </div>
       <StatusBadge tone={registration.state} label={t(registrationStateKey(registration.state))} />
+      {transport === undefined ? null : (
+        <span className="muted">{t('registration.transport', { transport: t(transportLabelKey(transport)) })}</span>
+      )}
       <ActionButton label={t('accounts.edit')} onClick={() => onEdit(account)} />
       <ActionButton label={t('accounts.remove')} variant="danger" onClick={() => onRemove(account)} />
     </li>

@@ -15,9 +15,9 @@ import {
 } from '@core/sip';
 import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
 import { IPC } from '../shared/api';
-import type { AccountDraft, AppSnapshot, SaveAccountResult } from '../shared/api';
+import type { AccountDraft, AccountView, AppSnapshot, SaveAccountResult } from '../shared/api';
 import { loadState, saveState } from './account-storage';
-import { SipEngine } from './sip-engine';
+import { SipEngine } from './sip/engine';
 import { log } from './windows';
 
 const DUPLICATE_ISSUE: ValidationIssue = {
@@ -32,10 +32,15 @@ class Controller {
 
   snapshot(): AppSnapshot {
     const registrations = this.engine.getRegistrations();
-    const accounts = listAccounts(this.store).map((account) => ({
-      account,
-      registration: registrations[account.id] ?? initialRegistration
-    }));
+    const transports = this.engine.getTransports();
+    const accounts = listAccounts(this.store).map((account): AccountView => {
+      const transport = transports[account.id]?.transport;
+      return {
+        account,
+        registration: registrations[account.id] ?? initialRegistration,
+        ...(transport === undefined ? {} : { transport })
+      };
+    });
     return { accounts, calls: this.engine.getCalls(), locale: this.locale };
   }
 

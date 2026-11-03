@@ -5,7 +5,7 @@ import { createMainWindow, log } from './windows';
 
 const CSP = [
   "default-src 'self'",
-  "connect-src 'self' ws: wss:",
+  "connect-src 'self'",
   "media-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'"
 ].join('; ');

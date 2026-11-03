@@ -18,6 +18,11 @@ function parseExpires(raw: string): { registerExpires?: number } {
   return Number.isNaN(value) ? {} : { registerExpires: value };
 }
 
+function serverUriField(env: Env, index: number): { serverUri?: string } {
+  const serverUri = field(env, index, 'SERVER_URI') || field(env, index, 'WS_SERVER');
+  return serverUri === '' ? {} : { serverUri };
+}
+
 function isComplete(parts: readonly string[]): boolean {
   return parts.every((part) => part !== '');
 }
@@ -26,11 +31,10 @@ function parseOne(env: Env, index: number): EnvAccountDraft | undefined {
   const username = field(env, index, 'USERNAME');
   const password = field(env, index, 'PASSWORD');
   const domain = field(env, index, 'DOMAIN');
-  const wsServer = field(env, index, 'WS_SERVER');
-  if (!isComplete([username, password, domain, wsServer])) return undefined;
+  if (!isComplete([username, password, domain])) return undefined;
   const displayName = field(env, index, 'DISPLAY_NAME') || username;
   const expires = parseExpires(field(env, index, 'REGISTER_EXPIRES'));
-  return { index, input: { displayName, username, password, domain, wsServer, ...expires } };
+  return { index, input: { displayName, username, password, domain, ...serverUriField(env, index), ...expires } };
 }
 
 export function parseEnvAccounts(env: Env): readonly EnvAccountDraft[] {
