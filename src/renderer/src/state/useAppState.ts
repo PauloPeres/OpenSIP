@@ -14,6 +14,7 @@ import { EMPTY_SNAPSHOT, getApi, normalizeSnapshot } from './api';
 export interface AppActions {
   readonly saveAccount: (draft: AccountDraft) => Promise<SaveAccountResult>;
   readonly deleteAccount: (id: AccountId) => Promise<void>;
+  readonly setAccountEnabled: (id: AccountId, enabled: boolean) => Promise<void>;
   readonly answer: (callId: string) => Promise<void>;
   readonly reject: (callId: string) => Promise<void>;
   readonly hangup: (callId: string) => Promise<void>;
@@ -38,6 +39,7 @@ function buildActions(): AppActions {
   return {
     saveAccount: (draft) => api.saveAccount(draft),
     deleteAccount: (id) => api.deleteAccount(id),
+    setAccountEnabled: (id, enabled) => api.setAccountEnabled(id, enabled),
     answer: (id) => api.answerCall(id),
     reject: (id) => api.rejectCall(id),
     hangup: (id) => api.hangupCall(id),

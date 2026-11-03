@@ -5,7 +5,7 @@ import type { SipMessage, SipRequest, SipResponse } from '../../src/core/sip';
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
 import type { SipConnection } from '../../src/main/sip/connection';
-import { SipEngine } from '../../src/main/sip/engine';
+import { ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
 import { createMediaBridge } from '../../src/main/media/media-window';
 import type { MediaBridgeDeps, MediaWindowHandle } from '../../src/main/media/media-window';
 import { MEDIA_FRAME_SAMPLES, MEDIA_IPC, toPcmFrame } from '../../src/shared/media';
@@ -456,6 +456,7 @@ type Harness = {
   created: { options: RtpSessionOptions; session: FakeSession }[];
   media: MediaBridge & Record<string, ReturnType<typeof vi.fn>>;
   diagnostics: ReturnType<typeof createDiagnosticsLog>;
+  clock: { now: number };
 };
 
 class Pbx {
@@ -503,13 +504,14 @@ function harness(): Harness {
   const created: { options: RtpSessionOptions; session: ReturnType<typeof fakeSession> }[] = [];
   const media = { start: vi.fn(), stop: vi.fn(), play: vi.fn(), onCapture: vi.fn(() => () => undefined), dispose: vi.fn() } as unknown as MediaBridge & Record<string, ReturnType<typeof vi.fn>>;
   const diagnostics = createDiagnosticsLog({ debug: true });
+  const clock = { now: 1_000_000 };
   const engine = new SipEngine({
     probe: { resolveSrv: async () => { throw new Error('nx'); }, probe: async () => 5, now: () => 0 },
     open: async () => pbx.connection,
-    diagnostics, media,
+    diagnostics, media, now: () => clock.now,
     rtp: { allocatePort: async () => 20000, create: (options) => { const session = fakeSession(); created.push({ options, session }); return session as unknown as RtpSession; } }
   });
-  return { pbx, engine, created, media, diagnostics };
+  return { pbx, engine, created, media, diagnostics, clock };
 }
 function fakeSession(): FakeSession {
   return { sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), close: vi.fn(), localPort: 20000, stats: { rxPackets: 3, txPackets: 4, lostPackets: 1, muted: false } };
@@ -579,16 +581,127 @@ describe('engine outbound call', () => {
     expect(h.engine.getCallViews()).toHaveLength(0);
   });
 
-  it('maps a 486 to an error, ACKs it, and ends the call', async () => {
+  const progressKeys = (h: Harness): string[] =>
+    h.diagnostics.entries().map((e) => e.messageKey).filter((key) => key.startsWith('calls.progress.'));
+
+  it('reports trying, ringing, connecting and active for a call that rings then answers', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180), reply(m, 183), reply(m, 200, {}, ANSWER)] : []);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    expect(progressKeys(h)).toEqual([
+      'calls.progress.trying',
+      'calls.progress.ringing',
+      'calls.progress.connecting',
+      'calls.progress.active'
+    ]);
+    const [view] = h.engine.getCallViews();
+    expect(view?.progress).toBe('calls.progress.active');
+    expect(view?.endReasonKey).toBeUndefined();
+    const logged = h.diagnostics.entries().find((e) => e.messageKey === 'calls.progress.ringing');
+    expect(logged?.level).toBe('info');
+  });
+
+  it('shows ringing on the view while the call is still ringing', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180)] : []);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    expect(h.engine.getCallViews()[0]?.progress).toBe('calls.progress.ringing');
+  });
+
+  it('maps a 486 to a busy end reason, ACKs it, and ends the call', async () => {
     const h = harness();
     await registered(h);
     h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 486)] : []);
     await h.engine.dial('acc1', '1002');
     await settle();
     expect(h.pbx.requests('ACK')).toHaveLength(1);
-    expect(h.engine.getCallViews()).toHaveLength(0);
+    const [view] = h.engine.getCallViews();
+    expect(view?.call.state).toBe('ended');
+    expect(view?.endReasonKey).toBe('calls.endReason.busy');
+    expect(view?.progress).toBe('calls.progress.ended');
     expect(h.diagnostics.entries().some((e) => e.messageKey === 'calls.error.failed')).toBe(true);
+    expect(h.diagnostics.entries().some((e) => e.messageKey === 'calls.endReason.busy' && e.level === 'info')).toBe(true);
     expect(h.created).toHaveLength(0);
+  });
+
+  it('lets an ended call lapse after ENDED_CALL_LINGER_MS on the injected clock, or at the next dial', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 486)] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    const start = h.clock.now;
+    expect(h.engine.getCallViews()).toHaveLength(1);
+    h.clock.now = start + ENDED_CALL_LINGER_MS - 1;
+    expect(h.engine.getCallViews()).toHaveLength(1);
+    h.clock.now = start + ENDED_CALL_LINGER_MS;
+    expect(h.engine.getCallViews()).toHaveLength(0);
+  });
+
+  it('clears an ended call at the next dial of the same account only', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 486)] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    const ended = h.engine.getCallViews()[0]?.call.id;
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 180)] : []);
+    await h.engine.dial('acc1', '1003');
+    expect(h.engine.getCallViews().some((v) => v.call.id === ended)).toBe(false);
+  });
+
+  it('notifies listeners once when the linger window closes while the row is still shown', async () => {
+    const h = harness();
+    await registered(h);
+    vi.useFakeTimers();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 603)] : []);
+      await h.engine.dial('acc1', '1002');
+      await vi.advanceTimersByTimeAsync(10);
+      const changes = vi.fn();
+      h.engine.onChange(changes);
+      await vi.advanceTimersByTimeAsync(ENDED_CALL_LINGER_MS);
+      expect(changes).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [603, 'calls.endReason.declined'],
+    [600, 'calls.endReason.busy'],
+    [480, 'calls.endReason.unanswered'],
+    [408, 'calls.endReason.unanswered'],
+    [404, 'calls.endReason.unreachable'],
+    [484, 'calls.endReason.unreachable'],
+    [604, 'calls.endReason.unreachable']
+  ])('maps a %i rejection to %s', async (status, key) => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 180), reply(m, status)] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    expect(h.engine.getCallViews()[0]?.endReasonKey).toBe(key);
+  });
+
+  it('leaves no end reason for a failure the user need not explain, and clears a shown one on the next dial', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 500)] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    expect(h.engine.getCallViews()).toHaveLength(0);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 603)] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    expect(h.engine.getCallViews()).toHaveLength(1);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 180)] : []);
+    await h.engine.dial('acc1', '1003');
+    expect(h.engine.getCallViews().map((v) => v.endReasonKey)).toEqual([undefined]);
   });
 
   it('acknowledges a retransmitted 200 again, and hangs up on a 200 that carries no usable SDP', async () => {

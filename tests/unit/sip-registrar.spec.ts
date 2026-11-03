@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAuthorization, createAccount, parseChallenge, serialize } from '../../src/core/sip';
 import type { SipAccount, SipMessage, SipRequest, SipResponse, TransportCandidate } from '../../src/core/sip';
 import type { IdFactory } from '../../src/main/sip/ids';
-import { buildRegisterRequest, register } from '../../src/main/sip/registrar';
+import { MAX_AUTH_ATTEMPTS, buildRegisterRequest, register } from '../../src/main/sip/registrar';
 import type { RegisterParams } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 
@@ -226,16 +226,60 @@ describe('register', () => {
     expect(connection.sent[1]?.headers['authorization']).toBeUndefined();
   });
 
-  it('does not retry a second 401', async () => {
-    const connection = fakeConnection((request) =>
-      reply(request, 401, { 'www-authenticate': [CHALLENGE] })
+  const challengeWith = (nonce: string, extra = ''): string =>
+    `Digest realm="asterisk", nonce="${nonce}", algorithm=MD5, qop="auth"${extra}`;
+  const nonceOf = (request: SipRequest): string | undefined =>
+    /nonce="([^"]*)"/.exec(request.headers['authorization']?.[0] ?? '')?.[1];
+
+  it('retries a second challenge that carries a new nonce and registers (live Kamailio trace)', async () => {
+    const connection = fakeConnection((request, n) =>
+      n < 3 ? reply(request, 401, { 'www-authenticate': [challengeWith(`nonce${n}`)] }) : reply(request, 200)
+    );
+    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 600 });
+    expect(connection.sent.map((r) => r.headers['cseq']?.[0])).toEqual([
+      '1 REGISTER',
+      '2 REGISTER',
+      '3 REGISTER'
+    ]);
+    expect(nonceOf(connection.sent[1] as SipRequest)).toBe('nonce1');
+    expect(nonceOf(connection.sent[2] as SipRequest)).toBe('nonce2');
+    const [a, b, c] = connection.sent;
+    expect(new Set([a, b, c].map((r) => r?.headers['call-id']?.[0])).size).toBe(1);
+    expect(new Set([a, b, c].map((r) => r?.headers['from']?.[0])).size).toBe(1);
+    const cnonces = [b, c].map((r) => /cnonce="([^"]*)"/.exec(r?.headers['authorization']?.[0] ?? '')?.[1]);
+    expect(new Set(cnonces).size).toBe(2);
+    expect(c?.headers['authorization']?.[0]).toContain('nc=00000001');
+  });
+
+  it('stops immediately when the same nonce is challenged twice (wrong password)', async () => {
+    const connection = fakeConnection((request) => reply(request, 401, { 'www-authenticate': [CHALLENGE] }));
+    await expect(run(connection)).resolves.toEqual({
+      ok: false,
+      status: 401,
+      errorKey: 'registration.error.unauthorized'
+    });
+    expect(connection.sent).toHaveLength(2);
+  });
+
+  it('gives up with unauthorized after MAX_AUTH_ATTEMPTS ever-changing nonces', async () => {
+    const connection = fakeConnection((request, n) =>
+      reply(request, 401, { 'www-authenticate': [challengeWith(`n${n}`)] })
     );
     await expect(run(connection)).resolves.toEqual({
       ok: false,
       status: 401,
-      errorKey: 'registration.error.rejected'
+      errorKey: 'registration.error.unauthorized'
     });
-    expect(connection.sent).toHaveLength(2);
+    expect(connection.sent).toHaveLength(1 + MAX_AUTH_ATTEMPTS);
+  });
+
+  it('always retries a stale=true challenge, even with a repeated nonce', async () => {
+    const connection = fakeConnection((request, n) => {
+      const extra = n === 2 ? ', stale=true' : '';
+      return n < 3 ? reply(request, 401, { 'www-authenticate': [challengeWith('same', extra)] }) : reply(request, 200);
+    });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true });
+    expect(connection.sent).toHaveLength(3);
   });
 
   it.each([

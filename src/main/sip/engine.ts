@@ -20,7 +20,6 @@ import {
   MalformedSdpError,
   NoCommonCodecError,
   TRANSPORT_ERROR_KEYS,
-  activeCalls,
   applyCallEvent,
   buildAuthorization,
   buildOffer,
@@ -82,6 +81,37 @@ const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
 const SUPPORTED_CODECS: readonly number[] = [PCMU_PAYLOAD_TYPE, PCMA_PAYLOAD_TYPE];
 /** The i18n catalogue has one generic key for a call that did not complete, whatever the cause. */
 const CALL_FAILED_KEY = 'calls.error.failed';
+
+/** Provisional status -> progress key; a 2xx and media start are tracked where they happen. */
+const PROGRESS_BY_STATUS: Readonly<Record<number, string>> = {
+  100: 'calls.progress.trying',
+  180: 'calls.progress.ringing',
+  183: 'calls.progress.ringing'
+};
+const PROGRESS_CONNECTING = 'calls.progress.connecting';
+const PROGRESS_ACTIVE = 'calls.progress.active';
+const PROGRESS_ENDED = 'calls.progress.ended';
+const END_REASON_BY_STATUS: Readonly<Record<number, string>> = {
+  486: 'calls.endReason.busy',
+  600: 'calls.endReason.busy',
+  603: 'calls.endReason.declined',
+  408: 'calls.endReason.unanswered',
+  480: 'calls.endReason.unanswered',
+  404: 'calls.endReason.unreachable',
+  484: 'calls.endReason.unreachable',
+  604: 'calls.endReason.unreachable'
+};
+const STATUS_REQUEST_TIMEOUT = 408;
+/** How long a call that ended with a reason stays in getCallViews(). */
+export const ENDED_CALL_LINGER_MS = 8000;
+
+/** What the user is told about one call, kept apart from the signalling state. */
+interface CallTrack {
+  progress?: string;
+  endReasonKey?: string;
+  /** Wall-clock ms when the end reason was recorded; the row lapses ENDED_CALL_LINGER_MS later. */
+  endedAt?: number;
+}
 
 const md5 = (input: string): string => createHash('md5').update(input).digest('hex');
 
@@ -417,11 +447,20 @@ function sessionOptions(localPort: number, plan: MediaPlan): RtpSessionOptions {
   };
 }
 
-function viewOf(call: CallSession, dialog: Dialog | undefined): CallView {
+function trackFields(track: CallTrack | undefined): Pick<CallView, 'progress' | 'endReasonKey'> {
+  const { progress, endReasonKey } = track ?? {};
+  return {
+    ...(progress === undefined ? {} : { progress }),
+    ...(endReasonKey === undefined ? {} : { endReasonKey })
+  };
+}
+
+function viewOf(call: CallSession, dialog: Dialog | undefined, track?: CallTrack): CallView {
   const connectedAt = dialog?.connectedAt;
   const media = dialog?.media;
   return {
     call,
+    ...trackFields(track),
     ...(connectedAt === undefined ? {} : { connectedAt }),
     ...(media === undefined || dialog === undefined ? {} : { media: { ...media.session.stats, muted: dialog.muted } })
   };
@@ -430,6 +469,7 @@ function viewOf(call: CallSession, dialog: Dialog | undefined): CallView {
 export class SipEngine {
   private readonly entries = new Map<AccountId, Entry>();
   private readonly dialogs = new Map<string, Dialog>();
+  private readonly tracks = new Map<string, CallTrack>();
   private registry: CallRegistry = emptyCallRegistry;
   private readonly listeners = new Set<Listener>();
   private readonly deps: EngineDeps;
@@ -450,7 +490,56 @@ export class SipEngine {
   }
 
   getCallViews(): readonly CallView[] {
-    return activeCalls(this.registry).map((call) => viewOf(call, this.dialogs.get(call.id)));
+    const shown = Object.values(this.registry).filter((call) => call.state !== 'ended' || this.lingers(call.id));
+    return shown.map((call) => viewOf(call, this.dialogs.get(call.id), this.tracks.get(call.id)));
+  }
+
+  /** Records what the call is doing now and mirrors it to the diagnostics log once per change. */
+  private setProgress(callId: string, progress: string): void {
+    const track = this.tracks.get(callId) ?? {};
+    this.tracks.set(callId, track);
+    if (track.progress === progress) return;
+    track.progress = progress;
+    this.note(this.registry[callId]?.accountId, progress, { params: { callId } });
+    this.emit();
+  }
+
+  /** Lazy expiry: no timer decides this, the clock is read each time the views are built. */
+  private lingers(callId: string): boolean {
+    const endedAt = this.tracks.get(callId)?.endedAt;
+    return endedAt !== undefined && this.deps.now() - endedAt < ENDED_CALL_LINGER_MS;
+  }
+
+  /** One wake-up when the window closes, so the UI re-renders without the row being dropped by a timer. */
+  private scheduleLapse(callId: string): void {
+    const lapse = setTimeout(() => {
+      if (this.tracks.delete(callId)) this.emit();
+    }, ENDED_CALL_LINGER_MS);
+    lapse.unref();
+  }
+
+  /** Remembers why a call failed, when the user should be told. */
+  private recordEnd(callId: string, status: number): void {
+    const endReasonKey = END_REASON_BY_STATUS[status];
+    if (endReasonKey === undefined) return;
+    this.setProgress(callId, PROGRESS_ENDED);
+    const track = this.tracks.get(callId);
+    if (track !== undefined) {
+      track.endReasonKey = endReasonKey;
+      track.endedAt = this.deps.now();
+      this.scheduleLapse(callId);
+    }
+    this.note(this.registry[callId]?.accountId, endReasonKey, { params: { callId, status: String(status) } });
+  }
+
+  /** Drops the ended-call notices of one account when it starts a new call. */
+  private forgetFinished(accountId: AccountId): void {
+    for (const [callId, track] of this.tracks) {
+      const call = this.registry[callId];
+      if (call?.accountId === accountId && call.state === 'ended' && track.endReasonKey !== undefined) {
+        this.tracks.delete(callId);
+      }
+    }
   }
 
   getRegistrations(): Readonly<Record<AccountId, RegistrationSnapshot>> {
@@ -569,6 +658,7 @@ export class SipEngine {
     const uri = this.normalise(target, entry.account.domain);
     if (uri === undefined) return fail('calls.error.invalidTarget');
     const callId = this.deps.ids.newCallId(reachableAt(entry.connection).host);
+    this.forgetFinished(accountId);
     const refusal = this.openOutgoing({ id: callId, accountId, target: uri });
     if (refusal !== undefined) return fail(refusal);
     return this.launch(entry, callId, uri);
@@ -631,15 +721,20 @@ export class SipEngine {
     if (connection === undefined) return;
     const send = (): void => void connection.send(request).catch(this.logSend);
     send();
-    const stop = startInviteTimers(send, () => this.failCall(dialog), connection.candidate.transport === 'udp');
+    const stop = startInviteTimers(send, () => this.failCall(dialog, STATUS_REQUEST_TIMEOUT), connection.candidate.transport === 'udp');
     dialog.pending = { cseq: dialog.cseq, authenticated, request, stop };
   }
 
   private onInviteResponse(dialog: Dialog, response: SipResponse): void {
     dialog.pending?.stop();
-    if (response.status < 200) return;
+    if (response.status < 200) return this.onProvisional(dialog, response.status);
     if (response.status < 300) return this.onAnswered(dialog, response);
     this.onInviteRejected(dialog, response);
+  }
+
+  private onProvisional(dialog: Dialog, status: number): void {
+    const progress = PROGRESS_BY_STATUS[status];
+    if (progress !== undefined) this.setProgress(dialog.callId, progress);
   }
 
   private onInviteRejected(dialog: Dialog, response: SipResponse): void {
@@ -648,7 +743,7 @@ export class SipEngine {
     if (pending !== undefined) this.sendAckTo(dialog, buildFailureAck(pending.request, response));
     if (dialog.cancelled) return void this.dialogs.delete(dialog.callId);
     if (isChallenge(response) && pending?.authenticated === false && this.retryWithCredentials(dialog, response)) return;
-    this.failCall(dialog);
+    this.failCall(dialog, response.status);
   }
 
   private retryWithCredentials(dialog: Dialog, response: SipResponse): boolean {
@@ -684,7 +779,9 @@ export class SipEngine {
     if (dialog.cancelled || negotiated === undefined) return this.endAnswered(dialog);
     dialog.plan = negotiated.plan;
     dialog.stage = 'confirmed';
-    if (this.dispatchCall(dialog.callId, { type: 'connected' })) this.startMedia(dialog);
+    if (!this.dispatchCall(dialog.callId, { type: 'connected' })) return;
+    this.setProgress(dialog.callId, PROGRESS_CONNECTING);
+    this.startMedia(dialog);
   }
 
   /** A 2xx we cannot use, or one that crossed our CANCEL: acknowledge it, then hang up at once. */
@@ -704,8 +801,9 @@ export class SipEngine {
     dialog.routes = [...headerValues(response.headers, 'record-route')].reverse();
   }
 
-  private failCall(dialog: Dialog): void {
+  private failCall(dialog: Dialog, status: number): void {
     dialog.pending?.stop();
+    this.recordEnd(dialog.callId, status);
     this.note(dialog.entry.account.id, CALL_FAILED_KEY, { level: 'warn' });
     this.releaseDialog(dialog);
     this.dispatchCall(dialog.callId, { type: 'remoteHangup' });
@@ -748,6 +846,7 @@ export class SipEngine {
       this.deps.media.start(dialog.callId);
       dialog.media = { session, stopPlayback };
       this.applyMute(dialog);
+      this.setProgress(dialog.callId, PROGRESS_ACTIVE);
     } catch (error) {
       log('warn', `media for ${dialog.callId} not started: ${String(error)}`);
     }
@@ -1159,12 +1258,20 @@ export class SipEngine {
     try {
       this.registry = applyCallEvent(this.registry, callId, event);
       this.markConnected(callId);
+      this.dropSilentEnd(callId);
       return true;
     } catch (error) {
       log('warn', `call ${event.type} ignored: ${String(error)}`);
       return false;
     } finally {
       this.emit();
+    }
+  }
+
+  /** An ended call with nothing to tell the user leaves no trace. */
+  private dropSilentEnd(callId: string): void {
+    if (this.registry[callId]?.state === 'ended' && this.tracks.get(callId)?.endReasonKey === undefined) {
+      this.tracks.delete(callId);
     }
   }
 

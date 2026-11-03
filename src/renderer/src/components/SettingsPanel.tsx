@@ -1,7 +1,9 @@
 import { SUPPORTED_LOCALES } from '@core/i18n';
 import type { Locale } from '@core/i18n';
 import type { UpdateStatus } from '../../../shared/api';
-import { SelectField } from './ui/Field';
+import { PermissionsSection } from './PermissionsSection';
+import { SelectField, Switch } from './ui/Field';
+import { usePermissions } from '../state/permissions';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { TranslationApi } from '../i18n/TranslatorProvider';
 
@@ -33,11 +35,19 @@ function LanguageSelect(): JSX.Element {
   );
 }
 
-export function SettingsPanel({ update }: { readonly update: UpdateStatus }): JSX.Element {
+export interface RingtonePref {
+  readonly enabled: boolean;
+  readonly set: (next: boolean) => void;
+}
+
+export function SettingsPanel({ update, ringtone }: { readonly update: UpdateStatus; readonly ringtone: RingtonePref }): JSX.Element {
   const { t } = useTranslation();
+  const permissions = usePermissions();
   return (
     <div className="panel form">
       <LanguageSelect />
+      <Switch id="ringtone" label={t('settings.ringtone')} hint={t('settings.ringtone.hint')} checked={ringtone.enabled} onChange={ringtone.set} />
+      <PermissionsSection model={permissions} />
       <p className="muted" role="status">
         {updateText(t, update)}
       </p>

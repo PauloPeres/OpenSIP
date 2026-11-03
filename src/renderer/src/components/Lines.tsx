@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { callStateKey } from '@core/sip';
 import type { AccountView, CallView } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
+import { isPending, progressKey } from '../state/callProgress';
 import { formatDuration } from '../state/format';
 import type { AppActions } from '../state/useAppState';
+import { isIncomingRing } from '../state/useLines';
 import type { Line } from '../state/useLines';
 import { Avatar } from './ui/Badge';
 import { Button } from './ui/Button';
@@ -64,6 +66,18 @@ function LineMeta({ line, env }: { readonly line: Line; readonly env: LineEnv })
   );
 }
 
+function Progress({ view }: { readonly view: CallView }): JSX.Element | null {
+  const { t } = useTranslation();
+  const key = progressKey(view);
+  if (key === null) return null;
+  return (
+    <span className={cx('progress', isPending(view) && 'progress-pending')}>
+      {isPending(view) ? <i className="spinner" aria-hidden="true" /> : null}
+      {t(key)}
+    </span>
+  );
+}
+
 function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv }): JSX.Element {
   const { t } = useTranslation();
   const { call } = line.view;
@@ -72,6 +86,7 @@ function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv
       <Lamp state={call.state} />
       <span className="line-main">
         <span className="line-name">{call.remoteIdentity}</span>
+        <Progress view={line.view} />
         <LineMeta line={line} env={env} />
       </span>
       <span className="line-state">
@@ -84,7 +99,7 @@ function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv
 
 export function LineRow({ line, env, onSelect }: { readonly line: Line; readonly env: LineEnv; readonly onSelect: (id: string) => void }): JSX.Element {
   const { t } = useTranslation();
-  const ringing = line.view.call.state === 'ringing';
+  const ringing = isIncomingRing(line);
   return (
     <li>
       <button type="button" className={cx('line', ringing && 'line-ringing')} onClick={() => onSelect(line.view.call.id)} title={t('calls.switchTo')} disabled={ringing}>

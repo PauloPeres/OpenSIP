@@ -22,6 +22,7 @@ const api: OpenSipApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC.listSnapshot),
   saveAccount: (input) => ipcRenderer.invoke(IPC.saveAccount, input),
   deleteAccount: (id) => ipcRenderer.invoke(IPC.deleteAccount, id),
+  setAccountEnabled: (id, enabled) => ipcRenderer.invoke(IPC.setAccountEnabled, id, enabled),
   answerCall: callAction(IPC.answerCall),
   rejectCall: callAction(IPC.rejectCall),
   hangupCall: callAction(IPC.hangupCall),
@@ -34,6 +35,7 @@ const api: OpenSipApi = {
   setLocale: (locale) => ipcRenderer.invoke(IPC.setLocale, locale),
   setDebugLogging: (enabled) => ipcRenderer.invoke(IPC.setDebugLogging, enabled),
   clearLogs: () => ipcRenderer.invoke(IPC.clearLogs),
+  openSystemSettings: () => ipcRenderer.invoke(IPC.openSystemSettings),
   onSnapshot: (cb) => subscribe(IPC.subscribe, cb),
   onUpdateStatus: (cb) => subscribe(IPC.updateStatus, cb)
 };

@@ -3,6 +3,7 @@ import {
   AccountValidationError,
   accountKey,
   createAccount,
+  restoreAccount,
   validateAccountInput
 } from '../../src/core/sip/account';
 import type { SipAccountInput } from '../../src/core/sip/types';
@@ -113,6 +114,7 @@ describe('createAccount', () => {
     expect(createAccount(valid, 'id-1')).toEqual({
       ...valid,
       id: 'id-1',
+      enabled: true,
       registerExpires: 600,
       uri: 'sip:alice@sip.example.com'
     });
@@ -123,7 +125,7 @@ describe('createAccount', () => {
     const account = createAccount(input, 'x');
     expect(Object.hasOwn(account, 'serverUri')).toBe(false);
     expect(Object.keys(account).sort()).toEqual(
-      ['displayName', 'domain', 'id', 'password', 'registerExpires', 'uri', 'username']
+      ['displayName', 'domain', 'enabled', 'id', 'password', 'registerExpires', 'uri', 'username']
     );
   });
 
@@ -131,6 +133,18 @@ describe('createAccount', () => {
     expect(() => createAccount({ ...valid, serverUri: 'ftp://pbx' }, 'x')).toThrow(
       AccountValidationError
     );
+  });
+
+  it('turns a new account on when the input omits enabled', () => {
+    expect(createAccount(valid, 'x').enabled).toBe(true);
+  });
+
+  it('keeps an explicit enabled false', () => {
+    expect(createAccount({ ...valid, enabled: false }, 'x').enabled).toBe(false);
+  });
+
+  it('keeps an explicit enabled true', () => {
+    expect(createAccount({ ...valid, enabled: true }, 'x').enabled).toBe(true);
   });
 
   it('keeps an explicit expiry', () => {
@@ -177,5 +191,33 @@ describe('accountKey', () => {
     expect(accountKey({ username: 'Alice', domain: 'SIP.Example.COM' })).toBe(
       'alice@sip.example.com'
     );
+  });
+});
+
+describe('accountKey and enabled', () => {
+  it('ignores enabled, so switching an account off and on never changes its key', () => {
+    const on = createAccount({ ...valid, enabled: true }, 'x');
+    const off = createAccount({ ...valid, enabled: false }, 'x');
+    expect(accountKey(off)).toBe(accountKey(on));
+    expect(accountKey(off)).toBe('alice@sip.example.com');
+  });
+});
+
+describe('restoreAccount', () => {
+  const stored = createAccount(valid, 'x');
+  const legacy: Omit<typeof stored, 'enabled'> & { enabled?: boolean } = { ...stored };
+  delete legacy.enabled;
+
+  it('loads an account stored before the switch existed as on', () => {
+    expect(restoreAccount(legacy)).toEqual({ ...stored, enabled: true });
+    expect(restoreAccount(legacy).enabled).toBe(true);
+  });
+
+  it('keeps a stored off switch', () => {
+    expect(restoreAccount({ ...legacy, enabled: false }).enabled).toBe(false);
+  });
+
+  it('keeps a stored on switch', () => {
+    expect(restoreAccount({ ...legacy, enabled: true }).enabled).toBe(true);
   });
 });

@@ -75,6 +75,12 @@ export function createAccount(input: SipAccountInput, id: AccountId): SipAccount
     domain,
     ...(serverUri === '' ? {} : { serverUri }),
     registerExpires: input.registerExpires ?? DEFAULT_REGISTER_EXPIRES,
+    enabled: input.enabled ?? true,
     uri: `sip:${username}@${domain}`
   };
+}
+
+/** An account as stored before the on/off switch existed has no `enabled`; it must come back on. */
+export function restoreAccount(stored: Omit<SipAccount, 'enabled'> & { readonly enabled?: boolean }): SipAccount {
+  return { ...stored, enabled: stored.enabled ?? true };
 }

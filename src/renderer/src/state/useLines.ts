@@ -13,6 +13,11 @@ export interface LinesModel {
   readonly focus: (callId: string) => void;
 }
 
+/** Only an inbound ring waits for the user; an outbound ring is a call in progress they can hang up. */
+export function isIncomingRing(line: Line): boolean {
+  return line.view.call.state === 'ringing' && line.view.call.direction === 'inbound';
+}
+
 function freeSlot(slots: ReadonlyMap<string, number>): number {
   const used = new Set(slots.values());
   let n = 1;
@@ -29,16 +34,18 @@ function assignSlots(slots: Map<string, number>, calls: readonly CallView[]): vo
 /** Ringing calls first, then by line number. */
 function ordered(slots: ReadonlyMap<string, number>, calls: readonly CallView[]): readonly Line[] {
   const lines = calls.map((view) => ({ view, slot: slots.get(view.call.id) ?? 0 }));
-  const rank = (l: Line): number => (l.view.call.state === 'ringing' ? 0 : 1);
+  const rank = (l: Line): number => (isIncomingRing(l) ? 0 : 1);
   return [...lines].sort((a, b) => rank(a) - rank(b) || a.slot - b.slot);
 }
 
 function pickFocus(lines: readonly Line[], wanted: string | null): Line | null {
-  const quiet = lines.filter((l) => l.view.call.state !== 'ringing');
+  const quiet = lines.filter((l) => !isIncomingRing(l));
   return quiet.find((l) => l.view.call.id === wanted) ?? quiet[0] ?? null;
 }
 
-export function useLines(calls: readonly CallView[]): LinesModel {
+/** Ended calls linger in the snapshot only to show why they ended; they are never a live line. */
+export function useLines(all: readonly CallView[]): LinesModel {
+  const calls = all.filter((c) => c.call.state !== 'ended');
   const slots = useRef(new Map<string, number>());
   const [wanted, setWanted] = useState<string | null>(null);
   assignSlots(slots.current, calls);

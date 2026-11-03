@@ -1,5 +1,6 @@
 import type { AccountView } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
+import { isIncomingRing } from '../state/useLines';
 import type { Line } from '../state/useLines';
 import { Button } from './ui/Button';
 import { Icon } from './ui/Icon';
@@ -28,7 +29,7 @@ function Incoming({ line, accountName, onAnswer, onReject }: Omit<IncomingProps,
 }
 
 export function IncomingCalls({ lines, accounts, onAnswer, onReject }: IncomingProps): JSX.Element | null {
-  const ringing = lines.filter((l) => l.view.call.state === 'ringing');
+  const ringing = lines.filter(isIncomingRing);
   if (ringing.length === 0) return null;
   return (
     <div className="incoming-stack">

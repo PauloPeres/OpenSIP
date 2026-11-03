@@ -60,3 +60,7 @@ export function removeAccount(state: AccountStoreState, id: AccountId): AccountS
 export function listAccounts(state: AccountStoreState): readonly SipAccount[] {
   return Object.values(state).sort((a, b) => a.displayName.localeCompare(b.displayName, 'en'));
 }
+
+export function enabledAccounts(state: AccountStoreState): readonly SipAccount[] {
+  return listAccounts(state).filter((account) => account.enabled);
+}

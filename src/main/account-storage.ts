@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { app, safeStorage } from 'electron';
 import { isSupportedLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
-import { emptyAccountStore } from '@core/sip';
+import { emptyAccountStore, restoreAccount } from '@core/sip';
 import type { AccountStoreState, SipAccount } from '@core/sip';
 import { log } from './windows';
 
@@ -20,7 +20,9 @@ export interface PersistedState {
   readonly debugLogging?: boolean;
 }
 
-type StoredAccount = Omit<SipAccount, 'password'> & {
+type StoredAccount = Omit<SipAccount, 'password' | 'enabled'> & {
+  /** Absent in files written before the on/off switch existed. */
+  readonly enabled?: boolean;
   readonly password: string;
   readonly passwordEncrypted: boolean;
 };
@@ -47,7 +49,7 @@ function decode(stored: StoredAccount): SipAccount {
   const plain = passwordEncrypted
     ? safeStorage.decryptString(Buffer.from(password, 'base64'))
     : password;
-  return { ...rest, password: plain };
+  return restoreAccount({ ...rest, password: plain });
 }
 
 function decodeAll(stored: Readonly<Record<string, StoredAccount>>): AccountStoreState {

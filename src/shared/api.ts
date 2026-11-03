@@ -15,6 +15,7 @@ export const IPC = {
   subscribe: 'opensip:snapshot:changed',
   saveAccount: 'opensip:account:save',
   deleteAccount: 'opensip:account:delete',
+  setAccountEnabled: 'opensip:account:enabled',
   answerCall: 'opensip:call:answer',
   rejectCall: 'opensip:call:reject',
   hangupCall: 'opensip:call:hangup',
@@ -27,6 +28,7 @@ export const IPC = {
   setLocale: 'opensip:locale:set',
   setDebugLogging: 'opensip:logs:debug',
   clearLogs: 'opensip:logs:clear',
+  openSystemSettings: 'opensip:system:settings',
   updateStatus: 'opensip:update:status'
 } as const;
 
@@ -50,6 +52,10 @@ export interface CallView {
   /** Wall-clock ms when the call became active; absent while it is not. */
   readonly connectedAt?: number;
   readonly media?: MediaStats;
+  /** i18n key for what the call is doing right now, e.g. 'calls.progress.ringing'. */
+  readonly progress?: string;
+  /** i18n key explaining why the call ended, when the user should be told. */
+  readonly endReasonKey?: string;
 }
 
 export interface AppSnapshot {
@@ -95,6 +101,8 @@ export interface OpenSipApi {
   getSnapshot(): Promise<AppSnapshot>;
   saveAccount(input: AccountDraft): Promise<SaveAccountResult>;
   deleteAccount(id: AccountId): Promise<void>;
+  /** Turns an account on or off; off unregisters now and persists across restarts. */
+  setAccountEnabled(id: AccountId, enabled: boolean): Promise<void>;
   answerCall(callId: string): Promise<void>;
   rejectCall(callId: string): Promise<void>;
   hangupCall(callId: string): Promise<void>;
@@ -109,6 +117,8 @@ export interface OpenSipApi {
   /** Turns raw SIP message capture on or off; returns the resulting state. */
   setDebugLogging(enabled: boolean): Promise<boolean>;
   clearLogs(): Promise<void>;
+  /** Opens the OS microphone privacy pane. Takes no argument: the target is fixed in the main process. */
+  openSystemSettings(): Promise<void>;
   onSnapshot(cb: (snapshot: AppSnapshot) => void): Unsubscribe;
   onUpdateStatus(cb: (status: UpdateStatus) => void): Unsubscribe;
 }

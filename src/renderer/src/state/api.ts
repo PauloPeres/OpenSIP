@@ -11,6 +11,7 @@ const OFFLINE_API: OpenSipApi = {
   getSnapshot: () => Promise.resolve(EMPTY),
   saveAccount: () => Promise.resolve({ ok: false, issues: [] }),
   deleteAccount: none,
+  setAccountEnabled: none,
   answerCall: none,
   rejectCall: none,
   hangupCall: none,
@@ -23,6 +24,7 @@ const OFFLINE_API: OpenSipApi = {
   setLocale: (locale) => Promise.resolve(locale),
   setDebugLogging: (enabled) => Promise.resolve(enabled),
   clearLogs: none,
+  openSystemSettings: none,
   onSnapshot: subscribeNone,
   onUpdateStatus: subscribeNone
 };

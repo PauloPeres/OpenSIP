@@ -8,6 +8,7 @@ import {
   withHeader
 } from '@core/sip';
 import type {
+  DigestChallenge,
   SipAccount,
   SipHeaders,
   SipRequest,
@@ -44,6 +45,7 @@ export type RegisterResult =
 
 type AuthHeaderName = 'authorization' | 'proxy-authorization';
 
+export const MAX_AUTH_ATTEMPTS = 3;
 export const USER_AGENT = 'OpenSIP/0.1.0';
 const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -58,7 +60,8 @@ const ERROR_KEYS = {
   forbidden: 'registration.error.forbidden',
   notFound: 'registration.error.notFound',
   timeout: 'registration.error.timeout',
-  rejected: 'registration.error.rejected'
+  rejected: 'registration.error.rejected',
+  unauthorized: 'registration.error.unauthorized'
 } as const;
 
 const STATUS_ERROR_KEYS: Readonly<Record<number, string>> = {
@@ -197,23 +200,26 @@ const isChallenge = (response: SipResponse | undefined): response is SipResponse
 interface Credentials {
   readonly value: string;
   readonly header: AuthHeaderName;
+  readonly nonce: string;
+  readonly stale: boolean;
 }
 
-function digestFor(raw: string, params: RegisterParams, deps: RegistrarDeps): string | undefined {
-  try {
-    return buildAuthorization({
-      challenge: parseChallenge(raw),
-      username: params.account.username,
-      password: params.account.password,
-      method: 'REGISTER',
-      digestUri: `sip:${params.account.domain}`,
-      nonceCount: 1,
-      cnonce: deps.ids.newCnonce(),
-      hash: deps.hash
-    });
-  } catch {
-    return undefined;
-  }
+function challengeOf(response: SipResponse): { raw: string | undefined; proxy: boolean } {
+  const proxy = response.status === 407;
+  return { raw: headerValue(response.headers, proxy ? 'proxy-authenticate' : 'www-authenticate'), proxy };
+}
+
+function digestFor(challenge: DigestChallenge, params: RegisterParams, deps: RegistrarDeps): string {
+  return buildAuthorization({
+    challenge,
+    username: params.account.username,
+    password: params.account.password,
+    method: 'REGISTER',
+    digestUri: `sip:${params.account.domain}`,
+    nonceCount: 1,
+    cnonce: deps.ids.newCnonce(),
+    hash: deps.hash
+  });
 }
 
 function credentialsFor(
@@ -221,24 +227,55 @@ function credentialsFor(
   params: RegisterParams,
   deps: RegistrarDeps
 ): Credentials | undefined {
-  const proxy = response.status === 407;
-  const raw = headerValue(response.headers, proxy ? 'proxy-authenticate' : 'www-authenticate');
-  const value = raw === undefined ? undefined : digestFor(raw, params, deps);
-  if (value === undefined) return undefined;
-  return { value, header: proxy ? 'proxy-authorization' : 'authorization' };
+  const { raw, proxy } = challengeOf(response);
+  if (raw === undefined) return undefined;
+  try {
+    const challenge = parseChallenge(raw);
+    const header = proxy ? 'proxy-authorization' : 'authorization';
+    return { value: digestFor(challenge, params, deps), header, nonce: challenge.nonce, stale: challenge.stale };
+  } catch {
+    return undefined;
+  }
 }
 
 /* ----------------------------------------------------------------- public */
 
+const unauthorized = (status: number): RegisterResult => ({
+  ok: false,
+  status,
+  errorKey: ERROR_KEYS.unauthorized
+});
+
+/**
+ * Answers each fresh challenge (RFC 3261 22 / RFC 2617): a repeated nonce means
+ * the credentials are wrong, a new or stale one is worth another try.
+ */
 async function authenticate(
   first: SipResponse,
   params: RegisterParams,
   deps: RegistrarDeps
 ): Promise<RegisterResult> {
-  const credentials = credentialsFor(first, params, deps);
-  if (credentials === undefined) return toResult(first, params.expires);
-  const retry = buildRegisterRequest(withAddresses(params, deps), deps.ids, 2, credentials.value, credentials.header);
-  return toResult(await exchange(deps, retry), params.expires);
+  let challenge = first;
+  let usedNonce: string | undefined;
+  for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt += 1) {
+    const credentials = credentialsFor(challenge, params, deps);
+    if (credentials === undefined) return toResult(challenge, params.expires);
+    if (credentials.nonce === usedNonce && !credentials.stale) return unauthorized(challenge.status);
+    const response = await exchange(deps, authenticatedRequest(params, deps, attempt + 1, credentials));
+    if (!isChallenge(response)) return toResult(response, params.expires);
+    challenge = response;
+    usedNonce = credentials.nonce;
+  }
+  return unauthorized(challenge.status);
+}
+
+function authenticatedRequest(
+  params: RegisterParams,
+  deps: RegistrarDeps,
+  cseq: number,
+  credentials: Credentials
+): SipRequest {
+  return buildRegisterRequest(withAddresses(params, deps), deps.ids, cseq, credentials.value, credentials.header);
 }
 
 /** Evaluated per request so an address learned from the first response is used by the next. */

@@ -37,6 +37,7 @@ export interface DialerModel {
   readonly registered: readonly AccountView[];
   readonly accountId: AccountId | null;
   readonly setAccountId: (id: AccountId) => void;
+  readonly waiting: boolean;
   readonly errorKey: string | null;
   readonly busy: boolean;
   readonly submit: (event: FormEvent) => void;
@@ -48,23 +49,44 @@ interface SubmitModel {
   readonly submit: (event: FormEvent) => void;
 }
 
-function useDialSubmit(args: DialerArgs, accountId: AccountId | null, target: string, clear: () => void): SubmitModel {
+/** Every refused attempt names its reason, so pressing Call never ends in silence. */
+function refusal(accountId: AccountId | null, target: string): string | null {
+  if (accountId === null) return 'calls.error.noAccount'; // i18n-exempt: translation key
+  return target.trim() === '' ? 'calls.error.noTarget' : null; // i18n-exempt: translation key
+}
+
+interface Request {
+  readonly errorKey: string | null;
+  readonly setErrorKey: (key: string | null) => void;
+  readonly busy: boolean;
+  readonly place: (id: AccountId, target: string) => void;
+}
+
+function useDialRequest(args: DialerArgs, clear: () => void): Request {
   const [errorKey, setErrorKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const finish = (result: DialResult): void => {
     setErrorKey(result.ok ? null : result.errorKey);
-    if (result.ok) clear();
-    if (result.ok) args.onDialed(result.callId);
+    if (!result.ok) return;
+    clear();
+    args.onDialed(result.callId);
   };
+  const place = (id: AccountId, target: string): void => {
+    setBusy(true);
+    const fail = (): void => setErrorKey('calls.error.failed');
+    args.dial(id, target.trim()).then(finish).catch(fail).finally(() => setBusy(false));
+  };
+  return { errorKey, setErrorKey, busy, place };
+}
+
+function useDialSubmit(args: DialerArgs, accountId: AccountId | null, target: string, clear: () => void): SubmitModel {
+  const { errorKey, setErrorKey, busy, place } = useDialRequest(args, clear);
+  useEffect(() => setErrorKey(null), [target, accountId, setErrorKey]);
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    if (target.trim() === '' || accountId === null || busy) return;
-    setBusy(true);
-    args
-      .dial(accountId, target.trim())
-      .then(finish)
-      .catch(() => setErrorKey('calls.error.failed'))
-      .finally(() => setBusy(false));
+    const refused = refusal(accountId, target);
+    setErrorKey(refused);
+    if (!busy && refused === null && accountId !== null) place(accountId, target);
   };
   return { errorKey, busy, submit };
 }
@@ -75,8 +97,9 @@ export function useDialer(args: DialerArgs): DialerModel {
   const append = useCallback((digit: string): void => setTarget((c) => c + digit), []);
   const backspace = useCallback((): void => setTarget((c) => c.slice(0, -1)), []);
   usePhysicalKeys(append, backspace);
-  const registered = args.accounts.filter((a) => a.registration.state === 'registered');
+  const registered = args.accounts.filter((a) => a.account.enabled && a.registration.state === 'registered');
   const accountId = registered.find((a) => a.account.id === chosen)?.account.id ?? registered[0]?.account.id ?? null;
   const sub = useDialSubmit(args, accountId, target, () => setTarget(''));
-  return { target, setTarget, append, backspace, registered, accountId, setAccountId, ...sub };
+  const waiting = args.accounts.some((a) => a.registration.state === 'registering');
+  return { target, setTarget, append, backspace, registered, accountId, setAccountId, waiting, ...sub };
 }

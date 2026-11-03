@@ -6,7 +6,8 @@ import { useTranslation } from '../i18n/TranslatorProvider';
 import { Button } from './ui/Button';
 import { FormField } from './ui/Field';
 
-type FieldName = keyof SipAccountInput;
+/** The on/off switch belongs to the accounts list; saving a draft without it keeps the account's current switch. */
+type FieldName = Exclude<keyof SipAccountInput, 'enabled'>;
 type Values = Readonly<Record<FieldName, string>>;
 
 interface FieldDef {
@@ -37,7 +38,15 @@ const BLANK: Values = {
 
 function toValues(account: SipAccount | undefined): Values {
   if (account === undefined) return BLANK;
-  return { ...account, serverUri: account.serverUri ?? '', registerExpires: String(account.registerExpires) };
+  const { displayName, username, password, domain } = account;
+  return {
+    displayName,
+    username,
+    password,
+    domain,
+    serverUri: account.serverUri ?? '',
+    registerExpires: String(account.registerExpires)
+  };
 }
 
 /** The display name is not asked for: it defaults to the username unless one already exists. */
@@ -94,6 +103,9 @@ function Field({ def, value, issues, onChange }: FieldProps): JSX.Element {
 
 interface AccountFormProps {
   readonly initial?: SipAccount;
+  /** Override the button labels, e.g. during onboarding. Keys, not text. */
+  readonly saveKey?: string;
+  readonly cancelKey?: string;
   readonly onSave: (draft: AccountDraft) => Promise<SaveAccountResult>;
   readonly onDone: () => void;
 }
@@ -119,12 +131,18 @@ function useAccountForm({ initial, onSave, onDone }: AccountFormProps): FormMode
   return { values, issues, change, submit };
 }
 
-function FormActions({ onCancel }: { readonly onCancel: () => void }): JSX.Element {
+interface ActionsProps {
+  readonly onCancel: () => void;
+  readonly saveKey: string;
+  readonly cancelKey: string;
+}
+
+function FormActions({ onCancel, saveKey, cancelKey }: ActionsProps): JSX.Element {
   const { t } = useTranslation();
   return (
     <div className="row">
-      <Button submit variant="primary" label={t('accounts.save')} onClick={() => undefined} />
-      <Button label={t('accounts.cancel')} onClick={onCancel} />
+      <Button submit variant="primary" label={t(saveKey)} onClick={() => undefined} />
+      <Button label={t(cancelKey)} onClick={onCancel} />
     </div>
   );
 }
@@ -158,13 +176,13 @@ export function AccountForm(props: AccountFormProps): JSX.Element {
   const group = { values, issues, onChange: change };
   const advancedHasIssue = issues.some((issue) => ADVANCED_FIELDS.some((def) => def.name === issue.field));
   return (
-    <form className="panel form" onSubmit={submit}>
+    <form className={props.saveKey ? 'form' : 'panel form'} onSubmit={submit}>
       <FieldGroup defs={BASIC_FIELDS} {...group} />
       <details open={advancedHasIssue || undefined}>
         <summary>{t('accounts.advanced')}</summary>
         <FieldGroup defs={ADVANCED_FIELDS} {...group} />
       </details>
-      <FormActions onCancel={props.onDone} />
+      <FormActions onCancel={props.onDone} saveKey={props.saveKey ?? 'accounts.save'} cancelKey={props.cancelKey ?? 'accounts.cancel'} />
     </form>
   );
 }

@@ -7,7 +7,10 @@ import { IncomingCalls } from './components/IncomingCalls';
 import { LinesPanel } from './components/LinesPanel';
 import { LogsPanel } from './components/LogsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import type { RingtonePref } from './components/SettingsPanel';
+import { Onboarding } from './components/Onboarding';
 import { Sidebar } from './components/Sidebar';
+import { StatusBar } from './components/StatusBar';
 import type { ViewId } from './components/Sidebar';
 import { Button } from './components/ui/Button';
 import { useTranslation } from './i18n/TranslatorProvider';
@@ -16,13 +19,28 @@ import { useAppState } from './state/useAppState';
 import type { AppState } from './state/useAppState';
 import { useLines } from './state/useLines';
 import type { LinesModel } from './state/useLines';
+import { useIncomingNotification } from './state/useIncomingNotification';
 import { useNow } from './state/useNow';
+import { useOnboarding } from './state/useOnboarding';
+import { useRingtone } from './state/useRingtone';
+import { useStoredFlag } from './state/storage';
 
 type Editing = SipAccount | 'new' | null;
+
+/** The switch shows the snapshot; a refused or failed request only adds a note beside that account. */
+function useToggle(actions: AppState['actions']): { readonly refusedId: string | null; readonly toggle: (a: SipAccount, enabled: boolean) => void } {
+  const [refusedId, setRefusedId] = useState<string | null>(null);
+  const toggle = (account: SipAccount, enabled: boolean): void => {
+    setRefusedId(null);
+    actions.setAccountEnabled(account.id, enabled).catch(() => setRefusedId(account.id));
+  };
+  return { refusedId, toggle };
+}
 
 function AccountsView({ state }: { readonly state: AppState }): JSX.Element {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<Editing>(null);
+  const { refusedId, toggle } = useToggle(state.actions);
   const { actions, snapshot } = state;
   if (editing !== null) {
     const initial = editing === 'new' ? undefined : editing;
@@ -34,7 +52,7 @@ function AccountsView({ state }: { readonly state: AppState }): JSX.Element {
         <h2 id="accounts-title" className="panel-title">{t('accounts.title')}</h2>
         <Button variant="primary" label={t('accounts.add')} onClick={() => setEditing('new')} />
       </div>
-      <AccountList accounts={snapshot.accounts} onEdit={setEditing} onRemove={(a) => void actions.deleteAccount(a.id)} />
+      <AccountList accounts={snapshot.accounts} calls={snapshot.calls} onEdit={setEditing} onRemove={(a) => void actions.deleteAccount(a.id)} onToggle={toggle} refusedId={refusedId} />
     </section>
   );
 }
@@ -49,10 +67,18 @@ function PhoneView({ state, model, now }: { readonly state: AppState; readonly m
   );
 }
 
-function ViewContent({ view, state, model, now }: { readonly view: ViewId; readonly state: AppState; readonly model: LinesModel; readonly now: number }): JSX.Element {
+interface ViewProps {
+  readonly view: ViewId;
+  readonly state: AppState;
+  readonly model: LinesModel;
+  readonly now: number;
+  readonly ringtone: RingtonePref;
+}
+
+function ViewContent({ view, state, model, now, ringtone }: ViewProps): JSX.Element {
   if (view === 'accounts') return <AccountsView state={state} />;
   if (view === 'logs') return <LogsPanel snapshot={state.snapshot} actions={state.actions} />;
-  if (view === 'settings') return <SettingsPanel update={state.update} />;
+  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} />;
   return <PhoneView state={state} model={model} now={now} />;
 }
 
@@ -60,6 +86,7 @@ interface CallFlow {
   readonly model: LinesModel;
   readonly now: number;
   readonly announcement: string;
+  readonly ringtone: RingtonePref;
   readonly answer: (callId: string) => void;
 }
 
@@ -67,17 +94,19 @@ function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
   const model = useLines(state.snapshot.calls);
   const now = useNow(model.lines.some((l) => l.view.connectedAt !== undefined));
   const announcement = useAnnouncement(model.lines);
+  const [enabled, setEnabled] = useStoredFlag('opensip.ringtone', true);
+  useRingtone(model.lines, enabled);
+  useIncomingNotification(model.lines, state.snapshot.accounts);
   const answer = (id: string): void => {
     void state.actions.answer(id);
     model.focus(id);
     showCalls();
   };
-  return { model, now, announcement, answer };
+  return { model, now, announcement, ringtone: { enabled, set: setEnabled }, answer };
 }
 
-export function App(): JSX.Element {
+function Workspace({ state }: { readonly state: AppState }): JSX.Element {
   const { t } = useTranslation();
-  const state = useAppState();
   const [view, setView] = useState<ViewId>('calls');
   const flow = useCallFlow(state, () => setView('calls'));
   const { accounts } = state.snapshot;
@@ -86,12 +115,20 @@ export function App(): JSX.Element {
       <Sidebar view={view} onView={setView} accounts={accounts} />
       <div className="main">
         <IncomingCalls lines={flow.model.lines} accounts={accounts} onAnswer={flow.answer} onReject={(id) => void state.actions.reject(id)} />
+        <StatusBar accounts={accounts} calls={state.snapshot.calls} />
         {state.failed ? <p className="notice" role="alert">{t('error.unexpected')}</p> : null}
         <main className="view">
-          <ViewContent view={view} state={state} model={flow.model} now={flow.now} />
+          <ViewContent view={view} state={state} model={flow.model} now={flow.now} ringtone={flow.ringtone} />
         </main>
       </div>
       <div className="sr-only" role="status" aria-live="polite">{flow.announcement}</div>
     </div>
   );
+}
+
+export function App(): JSX.Element {
+  const state = useAppState();
+  const onboarding = useOnboarding();
+  if (!onboarding.done) return <Onboarding onSave={state.actions.saveAccount} onFinish={onboarding.finish} />;
+  return <Workspace state={state} />;
 }

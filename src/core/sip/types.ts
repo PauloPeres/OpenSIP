@@ -8,11 +8,14 @@ export interface SipAccountInput {
   /** Optional manual override (e.g. tcp://pbx:5060); absent means discover the transport. */
   readonly serverUri?: string;
   readonly registerExpires?: number;
+  /** Whether the account is registered; absent means on. Not part of the account's identity. */
+  readonly enabled?: boolean;
 }
 
 export interface SipAccount extends SipAccountInput {
   readonly id: AccountId;
   readonly registerExpires: number;
+  readonly enabled: boolean;
   readonly uri: string;
 }
 

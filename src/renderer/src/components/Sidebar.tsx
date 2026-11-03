@@ -1,6 +1,8 @@
-import { registrationStateKey } from '@core/sip';
 import type { AccountView } from '../../../shared/api';
+import { displayState, stateKey } from '../state/accountState';
 import { useTranslation } from '../i18n/TranslatorProvider';
+import { RegistrationNote } from './RegistrationNote';
+import { Wordmark } from '../brand/Logo';
 import { Avatar } from './ui/Badge';
 import { cx } from './ui/cx';
 import { Icon } from './ui/Icon';
@@ -27,10 +29,11 @@ function AccountStatus({ accounts }: { readonly accounts: readonly AccountView[]
     <ul className="status-list">
       {accounts.map((view, index) => (
         <li key={view.account.id} className="status-item">
-          <Avatar name={view.account.displayName} hue={index} tone={view.registration.state} />
+          <Avatar name={view.account.displayName} hue={index} tone={displayState(view)} />
           <span className="status-text">
             <span className="status-name">{view.account.displayName}</span>
-            <span className="status-state">{t(registrationStateKey(view.registration.state))}</span>
+            <span className={`status-state status-${displayState(view)}`}>{t(stateKey(view))}</span>
+            <RegistrationNote registration={view.registration} failuresOnly />
           </span>
         </li>
       ))}
@@ -43,7 +46,7 @@ export function Sidebar({ view, onView, accounts }: SidebarProps): JSX.Element {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <h1>{t('app.title')}</h1>
+        <h1><Wordmark height={30} /></h1>
         <p>{t('app.tagline')}</p>
       </div>
       <nav className="nav" aria-label={t('app.title')}>

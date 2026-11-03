@@ -6,6 +6,7 @@ import {
   DuplicateAccountError,
   addAccount,
   emptyAccountStore,
+  enabledAccounts,
   getAccount,
   listAccounts,
   removeAccount,
@@ -84,6 +85,40 @@ describe('account store', () => {
     state = addAccount(state, make('2', { displayName: 'Alpha', username: 'u2' }));
     state = addAccount(state, make('3', { displayName: 'gamma', username: 'u3' }));
     expect(listAccounts(state).map((a) => a.id)).toEqual(['2', '1', '3']);
+  });
+});
+
+describe('account switch', () => {
+  const build = (): ReturnType<typeof addAccount> => {
+    let state = addAccount(emptyAccountStore, make('1', { displayName: 'beta', username: 'u1' }));
+    state = addAccount(state, make('2', { displayName: 'Alpha', username: 'u2', enabled: false }));
+    return addAccount(state, make('3', { displayName: 'gamma', username: 'u3' }));
+  };
+
+  it('keeps disabled accounts in listAccounts', () => {
+    expect(listAccounts(build()).map((a) => a.id)).toEqual(['2', '1', '3']);
+  });
+
+  it('lists only enabled accounts, in the same order as listAccounts', () => {
+    expect(enabledAccounts(build()).map((a) => a.id)).toEqual(['1', '3']);
+  });
+
+  it('lists nothing from an empty store', () => {
+    expect(enabledAccounts(emptyAccountStore)).toEqual([]);
+  });
+
+  it('turns an account off and on again without clashing with itself', () => {
+    const off = updateAccount(build(), '1', { enabled: false });
+    expect(getAccount(off, '1').enabled).toBe(false);
+    expect(enabledAccounts(off).map((a) => a.id)).toEqual(['3']);
+    const on = updateAccount(off, '1', { enabled: true });
+    expect(getAccount(on, '1').enabled).toBe(true);
+    expect(enabledAccounts(on).map((a) => a.id)).toEqual(['1', '3']);
+  });
+
+  it('keeps the switch when other fields are edited', () => {
+    const edited = updateAccount(build(), '2', { displayName: 'Renamed' });
+    expect(getAccount(edited, '2').enabled).toBe(false);
   });
 });
 

@@ -13,10 +13,12 @@ interface DialerProps {
   readonly onDialed: (callId: string) => void;
 }
 
+const NO_ACCOUNT = 'dialer.noAccount'; // i18n-exempt: translation key
+
 function AccountPicker({ model }: { readonly model: DialerModel }): JSX.Element {
   const { t } = useTranslation();
   const { registered, accountId } = model;
-  if (registered.length === 0) return <p className="notice">{t('dialer.noAccount')}</p>;
+  if (registered.length === 0) return <p className="notice">{t(model.waiting ? 'registration.state.registering' : NO_ACCOUNT)}</p>;
   const options = registered.map((a) => ({ value: a.account.id, label: `${a.account.displayName} (${a.account.username})` }));
   return (
     <SelectField id="dial-account" label={t('dialer.account')} value={accountId ?? ''} options={options} onChange={model.setAccountId} />
@@ -60,10 +62,19 @@ function DialError({ errorKey }: { readonly errorKey: string | null }): JSX.Elem
   );
 }
 
+function DialStatus({ busy }: { readonly busy: boolean }): JSX.Element | null {
+  const { t } = useTranslation();
+  if (!busy) return null;
+  return (
+    <p className="progress progress-pending" role="status">
+      {t('calls.progress.trying')}
+    </p>
+  );
+}
+
 export function Dialer(props: DialerProps): JSX.Element {
   const { t } = useTranslation();
   const model = useDialer(props);
-  const ready = model.accountId !== null && model.target.trim() !== '' && !model.busy;
   return (
     <section className="panel dialer" aria-labelledby="dialer-title">
       <h2 id="dialer-title" className="panel-title">{t('dialer.title')}</h2>
@@ -72,7 +83,8 @@ export function Dialer(props: DialerProps): JSX.Element {
         <TargetField model={model} />
         <Keypad label={t('dialer.title')} onDigit={model.append} />
         <DialError errorKey={model.errorKey} />
-        <Button submit large variant="success" icon="phone" label={t('dialer.call')} disabled={!ready} onClick={() => undefined} />
+        <DialStatus busy={model.busy} />
+        <Button submit large variant="success" icon="phone" label={t('dialer.call')} disabled={model.busy} onClick={() => undefined} />
       </form>
     </section>
   );

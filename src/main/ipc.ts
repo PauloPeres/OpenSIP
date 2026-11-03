@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { createDiagnosticsLog } from '@core/diagnostics';
 import { isSupportedLocale, resolveLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
@@ -9,9 +9,12 @@ import {
   addAccount,
   createAccount,
   emptyAccountStore,
+  enabledAccounts,
+  getAccount,
   initialRegistration,
   listAccounts,
   removeAccount,
+  updateAccount,
   validateAccountInput
 } from '@core/sip';
 import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
@@ -123,15 +126,47 @@ class Controller {
     const issues = [...validateAccountInput(input)];
     if (issues.length === 0 && this.isDuplicate(input, id)) issues.push(DUPLICATE_ISSUE);
     if (issues.length > 0) return { ok: false, issues };
-    await this.upsert(createAccount(input, id ?? randomUUID()));
+    await this.upsert(createAccount(this.keepingSwitch(input, id), id ?? randomUUID()));
     return { ok: true };
+  }
+
+  /** Editing an account must not silently turn a disabled one back on. */
+  private keepingSwitch(input: SipAccountInput, id: AccountId | undefined): SipAccountInput {
+    if (input.enabled !== undefined || id === undefined || !Object.hasOwn(this.store, id)) return input;
+    return { ...input, enabled: getAccount(this.store, id).enabled };
   }
 
   async upsert(account: SipAccount): Promise<void> {
     await this.engine.stopAccount(account.id);
     this.store = addAccount(removeIfPresent(this.store, account.id), account);
     await this.persist();
-    await this.engine.startAccount(account);
+    if (account.enabled) await this.engine.startAccount(account);
+    this.broadcast();
+  }
+
+  /** True while any call of the account is ringing, connecting, active or held. */
+  private hasLiveCall(id: AccountId): boolean {
+    return this.engine.getCallViews().some((view) => view.call.accountId === id && view.call.state !== 'ended');
+  }
+
+  /**
+   * Off refuses while the account has a live call (the user hangs up first) rather
+   * than tearing the call and its RTP session down underneath them.
+   */
+  async setEnabled(id: AccountId, enabled: boolean): Promise<void> {
+    const current = getAccount(this.store, id);
+    if (current.enabled === enabled) return;
+    if (!enabled && this.hasLiveCall(id)) throw new Error('accounts.disableBusy');
+    this.store = updateAccount(this.store, id, { enabled });
+    await this.persist();
+    this.diagnostics.append({
+      level: 'info',
+      messageKey: enabled ? 'logs.event.enabled' : 'logs.event.disabled',
+      accountId: id,
+      params: { account: current.uri }
+    });
+    if (enabled) await this.engine.startAccount(getAccount(this.store, id));
+    else await this.engine.stopAccount(id);
     this.broadcast();
   }
 
@@ -186,6 +221,23 @@ function registerMediaHandlers(controller: Controller): void {
   });
 }
 
+function registerAccountSwitchHandler(controller: Controller): void {
+  ipcMain.handle(IPC.setAccountEnabled, (_event, id: unknown, enabled: unknown): Promise<void> => {
+    if (typeof id !== 'string' || typeof enabled !== 'boolean') return Promise.reject(new Error('invalid-argument'));
+    if (!Object.hasOwn(controller.store, id)) return Promise.reject(new Error('account-not-found'));
+    return controller.setEnabled(id, enabled);
+  });
+}
+
+/** A fixed destination: nothing from the renderer reaches openExternal. Other platforms have no such deep link, so they do nothing. */
+const MAC_PRIVACY_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
+
+function registerSystemSettingsHandler(): void {
+  ipcMain.handle(IPC.openSystemSettings, async (): Promise<void> => {
+    if (process.platform === 'darwin') await shell.openExternal(MAC_PRIVACY_PANE);
+  });
+}
+
 function registerLogHandlers(controller: Controller): void {
   ipcMain.handle(IPC.setDebugLogging, (_event, enabled: unknown) => controller.setDebugLogging(enabled === true));
   ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
@@ -211,9 +263,11 @@ function registerHandlers(controller: Controller): void {
   ipcMain.handle(IPC.deleteAccount, (_event, id: AccountId) => controller.remove(id));
   ipcMain.handle(IPC.getLocale, () => controller.locale);
   ipcMain.handle(IPC.setLocale, (_event, locale: Locale) => controller.setLocale(locale));
+  registerAccountSwitchHandler(controller);
   registerCallHandlers(controller);
   registerMediaHandlers(controller);
   registerLogHandlers(controller);
+  registerSystemSettingsHandler();
 }
 
 export async function registerIpc(): Promise<void> {
@@ -233,5 +287,5 @@ export async function registerIpc(): Promise<void> {
       .catch((error: unknown) => log('warn', `engine stop: ${String(error)}`))
       .finally(() => controller.media.dispose());
   });
-  await controller.engine.start(listAccounts(controller.store));
+  await controller.engine.start(enabledAccounts(controller.store));
 }

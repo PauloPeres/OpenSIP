@@ -36,16 +36,17 @@ export function SelectField({ id, label, value, options, onChange }: SelectField
   );
 }
 
-export function Switch({ id, label, hint, checked, onChange }: {
+export function Switch({ id, label, hint, checked, disabled = false, onChange }: {
   readonly id: string;
   readonly label: string;
   readonly hint: string;
   readonly checked: boolean;
+  readonly disabled?: boolean;
   readonly onChange: (next: boolean) => void;
 }): JSX.Element {
   return (
     <div className="switch">
-      <input id={id} type="checkbox" role="switch" checked={checked} aria-describedby={`${id}-hint`} onChange={(e) => onChange(e.target.checked)} />
+      <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled} aria-describedby={`${id}-hint`} onChange={(e) => onChange(e.target.checked)} />
       <label htmlFor={id}>{label}</label>
       <span id={`${id}-hint`} className="hint">{hint}</span>
     </div>

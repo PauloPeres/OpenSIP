@@ -17,3 +17,12 @@ export function initialOf(name: string): string {
   const first = name.trim().charAt(0);
   return first === '' ? '#' : first.toUpperCase();
 }
+
+/** Translates a key that may come from outside the dictionary, falling back instead of throwing. */
+export function textOrFallback(t: (key: string) => string, key: string, fallbackKey: string): string {
+  try {
+    return t(key);
+  } catch {
+    return t(fallbackKey);
+  }
+}
