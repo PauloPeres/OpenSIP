@@ -21,7 +21,6 @@ import {
   NoCommonCodecError,
   TRANSPORT_ERROR_KEYS,
   applyCallEvent,
-  buildAuthorization,
   buildOffer,
   callsForAccount,
   canRetry,
@@ -35,7 +34,6 @@ import {
   negotiate,
   normaliseTarget,
   outgoingCall,
-  parseChallenge,
   parseSdp,
   parseUri,
   reduceRegistration,
@@ -72,8 +70,17 @@ import { defaultIdFactory } from './ids';
 import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
 import type { ProbeDeps } from './prober';
-import { TIMER_T1_MS, UDP_MAX_TRANSMISSIONS, UDP_TRANSACTION_TIMEOUT_MS, USER_AGENT, register } from './registrar';
-import type { AcceptedRegistration } from './registrar';
+import {
+  MAX_AUTH_ATTEMPTS,
+  TIMER_T1_MS,
+  UDP_MAX_TRANSMISSIONS,
+  UDP_TRANSACTION_TIMEOUT_MS,
+  USER_AGENT,
+  credentialsFor,
+  register,
+  repeatsNonce
+} from './registrar';
+import type { AcceptedRegistration, Credentials } from './registrar';
 
 const REFRESH_FRACTION = 0.9;
 const MIN_REFRESH_MS = 5_000;
@@ -125,7 +132,12 @@ const PROGRESS_BY_STATUS: Readonly<Record<number, string>> = {
 const PROGRESS_CONNECTING = 'calls.progress.connecting';
 const PROGRESS_ACTIVE = 'calls.progress.active';
 const PROGRESS_ENDED = 'calls.progress.ended';
+/** The same wording as a failed REGISTER: the PBX refused our credentials. */
+const UNAUTHORIZED_KEY = 'registration.error.unauthorized';
 const END_REASON_BY_STATUS: Readonly<Record<number, string>> = {
+  401: UNAUTHORIZED_KEY,
+  407: UNAUTHORIZED_KEY,
+  403: 'registration.error.forbidden',
   486: 'calls.endReason.busy',
   600: 'calls.endReason.busy',
   603: 'calls.endReason.declined',
@@ -152,7 +164,6 @@ const md5 = (input: string): string => createHash('md5').update(input).digest('h
 type Listener = () => void;
 type Timer = ReturnType<typeof setTimeout>;
 type Role = 'uac' | 'uas';
-type AuthHeader = 'authorization' | 'proxy-authorization';
 
 /** Creates and numbers the RTP port and session of one call. */
 export interface RtpFactory {
@@ -194,21 +205,24 @@ interface LiveMedia {
   readonly stopPlayback: () => void;
 }
 
-interface Credentials {
-  readonly header: AuthHeader;
-  readonly value: string;
-}
-
 /** Our own limit on how long a call may stay unanswered; see CALL_SETUP_TIMEOUT_MS. */
 interface SetupGuard {
   readonly expiry: Timer;
   waiting: Timer | undefined;
 }
 
+/** How many digest answers this INVITE has already carried, and to which nonce. */
+interface AuthState {
+  readonly attempt: number;
+  readonly nonce: string | undefined;
+}
+
+const UNSIGNED: AuthState = { attempt: 0, nonce: undefined };
+
 /** The client INVITE transaction we are waiting on (outbound calls only). */
 interface Pending {
   readonly cseq: number;
-  readonly authenticated: boolean;
+  readonly auth: AuthState;
   readonly request: SipRequest;
   stop(): void;
 }
@@ -750,7 +764,7 @@ export class SipEngine {
     try {
       const dialog = this.newOutbound(entry, callId, uri, await this.deps.rtp.allocatePort());
       this.dialogs.set(callId, dialog);
-      this.transmitInvite(dialog, dialog.invite, false);
+      this.transmitInvite(dialog, dialog.invite, UNSIGNED);
       dialog.setup = this.startSetupGuard(dialog);
     } catch (error) {
       this.dispatchCall(callId, { type: 'hangup' });
@@ -778,13 +792,13 @@ export class SipEngine {
     return String(Math.floor(this.deps.now() / 1000));
   }
 
-  private transmitInvite(dialog: Dialog, request: SipRequest, authenticated: boolean): void {
+  private transmitInvite(dialog: Dialog, request: SipRequest, auth: AuthState): void {
     const { connection } = dialog.entry;
     if (connection === undefined) return;
     const send = (): void => void connection.send(request).catch(this.logSend);
     send();
     const stop = startInviteTimers(send, () => this.failCall(dialog, STATUS_REQUEST_TIMEOUT), connection.candidate.transport === 'udp');
-    dialog.pending = { cseq: dialog.cseq, authenticated, request, stop };
+    dialog.pending = { cseq: dialog.cseq, auth, request, stop };
   }
 
   private onInviteResponse(dialog: Dialog, response: SipResponse): void {
@@ -848,32 +862,27 @@ export class SipEngine {
     dialog.pending = undefined;
     if (pending !== undefined) this.sendAckTo(dialog, buildFailureAck(pending.request, response));
     if (dialog.cancelled) return void this.dialogs.delete(dialog.callId);
-    if (isChallenge(response) && pending?.authenticated === false && this.retryWithCredentials(dialog, response)) return;
+    if (isChallenge(response) && pending !== undefined && this.retryWithCredentials(dialog, response, pending.auth)) return;
     this.failCall(dialog, response.status);
   }
 
-  private retryWithCredentials(dialog: Dialog, response: SipResponse): boolean {
+  /** One digest answer per fresh challenge: a repeated nonce, or too many rounds, means the credentials are wrong. */
+  private retryWithCredentials(dialog: Dialog, response: SipResponse, previous: AuthState): boolean {
+    if (previous.attempt >= MAX_AUTH_ATTEMPTS) return false;
     const credentials = this.credentialsFor(dialog, response);
-    if (credentials === undefined) return false;
+    if (credentials === undefined || repeatsNonce(credentials, previous.nonce)) return false;
     dialog.cseq += 1;
     const body = this.sdpFor(dialog, 'sendrecv');
-    this.transmitInvite(dialog, buildInvite(dialog, dialog.cseq, this.deps.ids.newBranch(), body, credentials), true);
+    const invite = buildInvite(dialog, dialog.cseq, this.deps.ids.newBranch(), body, credentials);
+    this.transmitInvite(dialog, invite, { attempt: previous.attempt + 1, nonce: credentials.nonce });
     return true;
   }
 
+  /** The digest URI is the INVITE's own request URI, not the registrar's. */
   private credentialsFor(dialog: Dialog, response: SipResponse): Credentials | undefined {
-    const proxy = response.status === 407;
-    const raw = headerValue(response.headers, proxy ? 'proxy-authenticate' : 'www-authenticate');
-    if (raw === undefined) return undefined;
     const { username, password } = dialog.entry.account;
-    try {
-      const challenge = parseChallenge(raw);
-      const cnonce = this.deps.ids.newCnonce();
-      const value = buildAuthorization({ challenge, username, password, cnonce, hash: md5, method: 'INVITE', digestUri: dialog.target, nonceCount: 1 });
-      return { value, header: proxy ? 'proxy-authorization' : 'authorization' };
-    } catch {
-      return undefined;
-    }
+    const newCnonce = (): string => this.deps.ids.newCnonce();
+    return credentialsFor(response, { username, password, method: 'INVITE', digestUri: dialog.target, newCnonce, hash: md5 });
   }
 
   private onAnswered(dialog: Dialog, response: SipResponse): void {

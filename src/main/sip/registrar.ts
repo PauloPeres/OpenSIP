@@ -21,6 +21,9 @@ import type {
 } from '@core/sip';
 import type { SipConnection } from './connection';
 import type { IdFactory } from './ids';
+import { USER_AGENT } from './user-agent';
+
+export { USER_AGENT };
 
 export interface RegistrarDeps {
   readonly connection: SipConnection;
@@ -59,7 +62,6 @@ export type RegisterResult =
 type AuthHeaderName = 'authorization' | 'proxy-authorization';
 
 export const MAX_AUTH_ATTEMPTS = 3;
-export const USER_AGENT = 'OpenSIPPhone/0.1.0';
 const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const STATUS_TIMEOUT = 408;
@@ -231,11 +233,21 @@ function toResult(response: SipResponse | undefined, requested: number, sent: Bi
 const isChallenge = (response: SipResponse | undefined): response is SipResponse =>
   response !== undefined && (response.status === 401 || response.status === 407);
 
-interface Credentials {
+export interface Credentials {
   readonly value: string;
   readonly header: AuthHeaderName;
   readonly nonce: string;
   readonly stale: boolean;
+}
+
+/** Who is signing which request: everything a digest answer needs besides the challenge itself. */
+export interface DigestSubject {
+  readonly username: string;
+  readonly password: string;
+  readonly method: string;
+  readonly digestUri: string;
+  readonly newCnonce: () => string;
+  readonly hash: (s: string) => string;
 }
 
 function challengeOf(response: SipResponse): { raw: string | undefined; proxy: boolean } {
@@ -243,33 +255,39 @@ function challengeOf(response: SipResponse): { raw: string | undefined; proxy: b
   return { raw: headerValue(response.headers, proxy ? 'proxy-authenticate' : 'www-authenticate'), proxy };
 }
 
-function digestFor(challenge: DigestChallenge, params: RegisterParams, deps: RegistrarDeps): string {
+function digestFor(challenge: DigestChallenge, subject: DigestSubject): string {
   return buildAuthorization({
     challenge,
-    username: params.account.username,
-    password: params.account.password,
-    method: 'REGISTER',
-    digestUri: `sip:${params.account.domain}`,
+    username: subject.username,
+    password: subject.password,
+    method: subject.method,
+    digestUri: subject.digestUri,
     nonceCount: 1,
-    cnonce: deps.ids.newCnonce(),
-    hash: deps.hash
+    cnonce: subject.newCnonce(),
+    hash: subject.hash
   });
 }
 
-function credentialsFor(
-  response: SipResponse,
-  params: RegisterParams,
-  deps: RegistrarDeps
-): Credentials | undefined {
+/** Answers a 401/407 for any method; undefined when the challenge is missing, malformed or unsupported. */
+export function credentialsFor(response: SipResponse, subject: DigestSubject): Credentials | undefined {
   const { raw, proxy } = challengeOf(response);
   if (raw === undefined) return undefined;
   try {
     const challenge = parseChallenge(raw);
     const header = proxy ? 'proxy-authorization' : 'authorization';
-    return { value: digestFor(challenge, params, deps), header, nonce: challenge.nonce, stale: challenge.stale };
+    return { value: digestFor(challenge, subject), header, nonce: challenge.nonce, stale: challenge.stale };
   } catch {
     return undefined;
   }
+}
+
+/** The same nonce back again, and not marked stale, means the credentials themselves are wrong. */
+export const repeatsNonce = (credentials: Credentials, usedNonce: string | undefined): boolean =>
+  credentials.nonce === usedNonce && !credentials.stale;
+
+function registerSubject(params: RegisterParams, deps: RegistrarDeps): DigestSubject {
+  const { username, password, domain } = params.account;
+  return { username, password, method: 'REGISTER', digestUri: `sip:${domain}`, newCnonce: () => deps.ids.newCnonce(), hash: deps.hash };
 }
 
 /* ----------------------------------------------------------------- public */
@@ -292,9 +310,9 @@ async function authenticate(
   let challenge = first;
   let usedNonce: string | undefined;
   for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt += 1) {
-    const credentials = credentialsFor(challenge, params, deps);
+    const credentials = credentialsFor(challenge, registerSubject(params, deps));
     if (credentials === undefined) return toResult(challenge, params.expires, contactOwner(params));
-    if (credentials.nonce === usedNonce && !credentials.stale) return unauthorized(challenge.status);
+    if (repeatsNonce(credentials, usedNonce)) return unauthorized(challenge.status);
     const sent = withAddresses(params, deps);
     const response = await exchange(deps, authenticatedRequest(sent, deps, attempt + 1, credentials));
     if (!isChallenge(response)) return toResult(response, params.expires, contactOwner(sent));

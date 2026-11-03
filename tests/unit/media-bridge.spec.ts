@@ -5,7 +5,7 @@ import type { SipMessage, SipRequest, SipResponse, TransportCandidate } from '..
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
 import { openConnection } from '../../src/main/sip/connection';
-import { buildRegisterRequest } from '../../src/main/sip/registrar';
+import { MAX_AUTH_ATTEMPTS, buildRegisterRequest } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
 import { createMediaBridge } from '../../src/main/media/media-window';
@@ -1394,5 +1394,87 @@ describe('UDP connection', () => {
     const invite = h.pbx.requests('INVITE')[0] as SipRequest;
     expect(headerValue(invite.headers, 'via')).toMatch(new RegExp(`^SIP/2\\.0/UDP ${udp.lan}:40123;branch=\\S+;rport$`));
     expect(JSON.stringify([register, invite])).not.toContain('0.0.0.0');
+  });
+});
+
+describe('engine INVITE digest challenge (Zoiper wire trace against OpenSIPS)', () => {
+  const UNAUTHORIZED = 'registration.error.unauthorized';
+  const challenge = (nonce: string, extra = ''): string =>
+    `Digest realm="198.51.100.248", nonce="${nonce}", qop="auth"${extra}`;
+  const proxyChallenge = (m: SipRequest, nonce: string, extra = ''): SipResponse =>
+    reply(m, 407, { 'proxy-authenticate': [challenge(nonce, extra)] });
+  const trying = (m: SipRequest): SipResponse[] => [reply(m, 100), reply(m, 100)];
+  const invites = (h: Harness): SipRequest[] => h.pbx.requests('INVITE');
+  const header = (m: SipRequest, name: string): string => headerValue(m.headers, name) ?? '';
+  const branchOf = (m: SipRequest): string => /branch=([^;]+)/.exec(header(m, 'via'))?.[1] ?? '';
+
+  async function dialWith(respond: (m: SipRequest, n: number) => SipResponse[]): Promise<Harness> {
+    const h = harness();
+    await registered(h);
+    let n = 0;
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? respond(m, (n += 1)) : []);
+    await h.engine.dial('acc1', '055500000396');
+    await settle();
+    return h;
+  }
+
+  it('ACKs the 407 on its own branch, retries with Proxy-Authorization, and completes the call', async () => {
+    const h = await dialWith((m, n) => (n === 1 ? [...trying(m), proxyChallenge(m, 'nnufCsb')] : [...trying(m), reply(m, 180), reply(m, 200, {}, ANSWER)]));
+    const [first, second] = invites(h) as [SipRequest, SipRequest];
+    expect(invites(h)).toHaveLength(2);
+    const ack407 = h.pbx.requests('ACK')[0] as SipRequest;
+    expect(branchOf(ack407)).toBe(branchOf(first));
+    expect(header(ack407, 'cseq')).toBe('1 ACK');
+    expect(header(ack407, 'to')).toContain('tag=pbx1');
+    expect(ack407.uri).toBe(first.uri);
+    const auth = header(second, 'proxy-authorization');
+    expect(auth).toContain('realm="198.51.100.248"');
+    expect(auth).toContain('nonce="nnufCsb"');
+    expect(auth).toContain(`uri="${first.uri}"`);
+    expect(auth).toContain('qop=auth');
+    expect(header(second, 'authorization')).toBe('');
+    expect(branchOf(second)).not.toBe(branchOf(first));
+    expect(header(second, 'cseq')).toBe('2 INVITE');
+    expect(header(second, 'call-id')).toBe(header(first, 'call-id'));
+    expect(h.engine.getCallViews()[0]?.call.state).toBe('active');
+  });
+
+  it('answers a 401 with Authorization, not Proxy-Authorization', async () => {
+    const h = await dialWith((m, n) => (n === 1 ? [reply(m, 401, { 'www-authenticate': [challenge('n1')] })] : [reply(m, 200, {}, ANSWER)]));
+    const second = invites(h)[1] as SipRequest;
+    expect(header(second, 'authorization')).toContain('nonce="n1"');
+    expect(header(second, 'proxy-authorization')).toBe('');
+  });
+
+  it('stops when the same nonce is challenged again: wrong password never loops', async () => {
+    const h = await dialWith((m) => [...trying(m), proxyChallenge(m, 'same')]);
+    expect(invites(h)).toHaveLength(2);
+    const acks = h.pbx.requests('ACK');
+    expect(acks.map(branchOf)).toEqual(invites(h).map(branchOf));
+    const view = h.engine.getCallViews()[0];
+    expect(view?.call.state).toBe('ended');
+    expect(view?.endReasonKey).toBe(UNAUTHORIZED);
+  });
+
+  it('retries once more for a stale nonce, but gives up after a bounded number of challenges', async () => {
+    let seq = 0;
+    const h = await dialWith((m) => [proxyChallenge(m, `n${(seq += 1)}`, ', stale=true')]);
+    expect(invites(h).length).toBeGreaterThan(2);
+    expect(invites(h).length).toBeLessThanOrEqual(MAX_AUTH_ATTEMPTS + 1);
+    expect(h.engine.getCallViews()[0]?.endReasonKey).toBe(UNAUTHORIZED);
+  });
+
+  it('reports a challenge it cannot answer as a credentials failure', async () => {
+    const h = await dialWith((m) => [reply(m, 407)]);
+    expect(invites(h)).toHaveLength(1);
+    expect(h.pbx.requests('ACK')).toHaveLength(1);
+    expect(h.engine.getCallViews()[0]?.endReasonKey).toBe(UNAUTHORIZED);
+  });
+
+  it('logs a received 407 and marks the challenge', async () => {
+    const h = await dialWith((m, n) => (n === 1 ? [proxyChallenge(m, 'x')] : [reply(m, 200, {}, ANSWER)]));
+    const keys = h.diagnostics.entries().map((e) => `${e.messageKey}:${e.params?.['status'] ?? ''}`);
+    expect(keys).toContain('logs.event.received:407');
+    expect(keys).toContain('logs.event.challenged:');
   });
 });

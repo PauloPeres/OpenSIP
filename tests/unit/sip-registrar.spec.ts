@@ -505,3 +505,34 @@ describe('register', () => {
     });
   });
 });
+
+describe('User-Agent override (OPENSIP_USER_AGENT)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  const loadAgents = async (): Promise<{ register: string | undefined; probe: string }> => {
+    vi.resetModules();
+    const registrar = await import('../../src/main/sip/registrar');
+    const prober = await import('../../src/main/sip/prober');
+    const request = registrar.buildRegisterRequest(params(), sequentialIds(), 1);
+    return { register: request.headers['user-agent']?.[0], probe: prober.PROBE_USER_AGENT };
+  };
+
+  it('defaults to OpenSIPPhone/0.1.0 when unset or blank', async () => {
+    vi.stubEnv('OPENSIP_USER_AGENT', '');
+    expect(await loadAgents()).toEqual({ register: 'OpenSIPPhone/0.1.0', probe: 'OpenSIPPhone/0.1.0' });
+  });
+
+  it('uses the override on the REGISTER and on the probe', async () => {
+    vi.stubEnv('OPENSIP_USER_AGENT', 'Z 5.6.16 v2.10.20.18');
+    expect(await loadAgents()).toEqual({ register: 'Z 5.6.16 v2.10.20.18', probe: 'Z 5.6.16 v2.10.20.18' });
+  });
+
+  it('resolves from any environment object', async () => {
+    const { resolveUserAgent } = await import('../../src/main/sip/user-agent');
+    expect(resolveUserAgent({})).toBe('OpenSIPPhone/0.1.0');
+    expect(resolveUserAgent({ OPENSIP_USER_AGENT: '  X/1  ' })).toBe('X/1');
+  });
+});

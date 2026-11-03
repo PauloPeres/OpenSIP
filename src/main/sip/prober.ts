@@ -13,6 +13,7 @@ import {
   srvQueryNames
 } from '@core/sip';
 import type { ProbeOutcome, SrvRecord, TransportCandidate } from '@core/sip';
+import { USER_AGENT } from './user-agent';
 
 export interface ProbeDeps {
   resolveSrv(
@@ -179,7 +180,7 @@ export function buildOptionsProbe(host: string, localPort: number, branch: strin
   ].join('\r\n');
 }
 
-export const PROBE_USER_AGENT = 'OpenSIPPhone/0.1.0';
+export const PROBE_USER_AGENT = USER_AGENT;
 
 const probeBranch = (): string => `z9hG4bK${randomBytes(6).toString('hex')}`;
 
