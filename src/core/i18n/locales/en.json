@@ -52,5 +52,19 @@
   "settings.updates.available": "Version {version} is available",
   "settings.updates.checking": "Checking for updates...",
   "settings.updates.error": "Could not check for updates",
-  "settings.updates.upToDate": "You are up to date"
+  "settings.updates.upToDate": "You are up to date",
+  "transport.discovering": "Finding the best way to connect…",
+  "transport.error.dns": "The domain could not be resolved",
+  "transport.error.invalid-domain": "Enter a valid SIP domain",
+  "transport.error.none-reachable": "No way to reach this server was found",
+  "transport.error.refused": "The server refused the connection",
+  "transport.error.timeout": "The server did not answer in time",
+  "transport.error.tls": "The secure connection could not be established",
+  "transport.error.unsupported": "This transport is not supported",
+  "transport.selected": "Connected over {transport}",
+  "transport.tcp": "TCP",
+  "transport.tls": "TLS (encrypted, reliable)",
+  "transport.udp": "UDP",
+  "transport.ws": "WebSocket",
+  "transport.wss": "WebSocket Secure"
 }

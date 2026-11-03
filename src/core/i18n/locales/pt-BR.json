@@ -52,5 +52,19 @@
   "settings.updates.available": "A versão {version} está disponível",
   "settings.updates.checking": "Verificando atualizações...",
   "settings.updates.error": "Não foi possível verificar atualizações",
-  "settings.updates.upToDate": "Você está atualizado"
+  "settings.updates.upToDate": "Você está atualizado",
+  "transport.discovering": "Procurando a melhor forma de conectar…",
+  "transport.error.dns": "Não foi possível resolver o domínio",
+  "transport.error.invalid-domain": "Informe um domínio SIP válido",
+  "transport.error.none-reachable": "Nenhuma forma de alcançar este servidor foi encontrada",
+  "transport.error.refused": "O servidor recusou a conexão",
+  "transport.error.timeout": "O servidor não respondeu no tempo esperado",
+  "transport.error.tls": "Não foi possível estabelecer a conexão segura",
+  "transport.error.unsupported": "Este transporte não é suportado",
+  "transport.selected": "Conectado por {transport}",
+  "transport.tcp": "TCP",
+  "transport.tls": "TLS (criptografado, confiável)",
+  "transport.udp": "UDP",
+  "transport.ws": "WebSocket",
+  "transport.wss": "WebSocket Secure"
 }
