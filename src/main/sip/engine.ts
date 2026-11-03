@@ -43,6 +43,7 @@ import {
   serialize,
   withHeader
 } from '@core/sip';
+import type { AccountSharing } from '../../shared/api';
 import type {
   AccountId,
   CallEvent,
@@ -71,6 +72,7 @@ import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
 import type { ProbeDeps } from './prober';
 import { TIMER_T1_MS, UDP_MAX_TRANSMISSIONS, UDP_TRANSACTION_TIMEOUT_MS, USER_AGENT, register } from './registrar';
+import type { AcceptedRegistration } from './registrar';
 
 const REFRESH_FRACTION = 0.9;
 const MIN_REFRESH_MS = 5_000;
@@ -82,11 +84,42 @@ const SUPPORTED_CODECS: readonly number[] = [PCMU_PAYLOAD_TYPE, PCMA_PAYLOAD_TYP
 /** The i18n catalogue has one generic key for a call that did not complete, whatever the cause. */
 const CALL_FAILED_KEY = 'calls.error.failed';
 
+const PROGRESS_TRYING = 'calls.progress.trying';
+const PROGRESS_RINGING = 'calls.progress.ringing';
+const PROGRESS_WAITING = 'calls.progress.waiting';
+const END_REASON_SETUP_TIMEOUT = 'calls.endReason.setupTimeout';
+
+/**
+ * How long an outbound call may take to be answered, counted from the moment
+ * the INVITE is sent.
+ *
+ * RFC 3261 17.1.1 makes the first provisional response (even a bare 100) move
+ * the INVITE client transaction to Proceeding and CANCEL timer B, so a UAC that
+ * got a 100 is specified to wait for a final response indefinitely. A server
+ * that never completes the call (a dialplan that swallows it) would leave the
+ * user on a spinner forever, so, like real softphones, we apply our own guard.
+ *
+ * Do NOT "fix" this by restarting the timer on provisional responses: a stream
+ * of 100s must not keep the call alive, and a far end that rings for the whole
+ * period without answering is also a call the user should be released from, so
+ * 180 and 183 deliberately leave the guard running too.
+ */
+export const CALL_SETUP_TIMEOUT_MS = 90_000;
+
+/**
+ * How long "Trying" may stay on screen after the first 100 before we say we are
+ * waiting for the server. Post-dial delay on a healthy route (to the first 180
+ * or 183) is normally one to three seconds and ITU-T E.721 treats a few seconds
+ * as the acceptable ceiling, so 4 s leaves normal calls untouched, yet the user
+ * hears from us long before the 90 s guard, rather than staring at a frozen label.
+ */
+export const CALL_WAITING_GRACE_MS = 4_000;
+
 /** Provisional status -> progress key; a 2xx and media start are tracked where they happen. */
 const PROGRESS_BY_STATUS: Readonly<Record<number, string>> = {
-  100: 'calls.progress.trying',
-  180: 'calls.progress.ringing',
-  183: 'calls.progress.ringing'
+  100: PROGRESS_TRYING,
+  180: PROGRESS_RINGING,
+  183: PROGRESS_RINGING
 };
 const PROGRESS_CONNECTING = 'calls.progress.connecting';
 const PROGRESS_ACTIVE = 'calls.progress.active';
@@ -143,6 +176,9 @@ interface Entry {
   connection: SipConnection | undefined;
   timer: Timer | undefined;
   stopped: boolean;
+  /** What the last REGISTER 200 said about other devices, and its change-detection key. */
+  sharing: AccountSharing | undefined;
+  sharingKey: string | undefined;
 }
 
 interface MediaPlan {
@@ -160,6 +196,12 @@ interface LiveMedia {
 interface Credentials {
   readonly header: AuthHeader;
   readonly value: string;
+}
+
+/** Our own limit on how long a call may stay unanswered; see CALL_SETUP_TIMEOUT_MS. */
+interface SetupGuard {
+  readonly expiry: Timer;
+  waiting: Timer | undefined;
 }
 
 /** The client INVITE transaction we are waiting on (outbound calls only). */
@@ -194,6 +236,7 @@ interface Dialog {
   plan: MediaPlan | undefined;
   media: LiveMedia | undefined;
   pending: Pending | undefined;
+  setup: SetupGuard | undefined;
   held: boolean;
   muted: boolean;
   cancelled: boolean;
@@ -522,6 +565,10 @@ export class SipEngine {
   private recordEnd(callId: string, status: number): void {
     const endReasonKey = END_REASON_BY_STATUS[status];
     if (endReasonKey === undefined) return;
+    this.recordReason(callId, endReasonKey, { params: { callId, status: String(status) } });
+  }
+
+  private recordReason(callId: string, endReasonKey: string, details: Note): void {
     this.setProgress(callId, PROGRESS_ENDED);
     const track = this.tracks.get(callId);
     if (track !== undefined) {
@@ -529,7 +576,7 @@ export class SipEngine {
       track.endedAt = this.deps.now();
       this.scheduleLapse(callId);
     }
-    this.note(this.registry[callId]?.accountId, endReasonKey, { params: { callId, status: String(status) } });
+    this.note(this.registry[callId]?.accountId, endReasonKey, details);
   }
 
   /** Drops the ended-call notices of one account when it starts a new call. */
@@ -540,6 +587,12 @@ export class SipEngine {
         this.tracks.delete(callId);
       }
     }
+  }
+
+  /** Per account: how many other devices hold it, and whether our own binding was displaced. */
+  getSharing(): Readonly<Record<AccountId, AccountSharing>> {
+    const known = [...this.entries].flatMap(([id, entry]) => (entry.sharing === undefined ? [] : [[id, entry.sharing] as const]));
+    return Object.fromEntries(known);
   }
 
   getRegistrations(): Readonly<Record<AccountId, RegistrationSnapshot>> {
@@ -571,7 +624,9 @@ export class SipEngine {
       candidate: undefined,
       connection: undefined,
       timer: undefined,
-      stopped: false
+      stopped: false,
+      sharing: undefined,
+      sharingKey: undefined
     };
     this.entries.set(account.id, entry);
     this.dispatchRegistration(entry, { type: 'register' });
@@ -690,6 +745,7 @@ export class SipEngine {
       const dialog = this.newOutbound(entry, callId, uri, await this.deps.rtp.allocatePort());
       this.dialogs.set(callId, dialog);
       this.transmitInvite(dialog, dialog.invite, false);
+      dialog.setup = this.startSetupGuard(dialog);
     } catch (error) {
       this.dispatchCall(callId, { type: 'hangup' });
       this.note(entry.account.id, CALL_FAILED_KEY, { level: 'warn', params: { reason: technical(error) } });
@@ -732,11 +788,55 @@ export class SipEngine {
     this.onInviteRejected(dialog, response);
   }
 
+  /** A repeated 100 must not drag "ringing" or "waiting" back to "trying". */
   private onProvisional(dialog: Dialog, status: number): void {
     const progress = PROGRESS_BY_STATUS[status];
-    if (progress !== undefined) this.setProgress(dialog.callId, progress);
+    if (progress === undefined) return;
+    const trying = progress === PROGRESS_TRYING;
+    if (trying && this.tracks.get(dialog.callId)?.progress !== undefined) return;
+    this.setProgress(dialog.callId, progress);
+    if (trying) this.armWaiting(dialog);
   }
 
+  /* ----------------------------------------------------- setup guard */
+
+  private startSetupGuard(dialog: Dialog): SetupGuard {
+    const expiry = setTimeout(() => this.expireSetup(dialog), CALL_SETUP_TIMEOUT_MS);
+    expiry.unref();
+    return { expiry, waiting: undefined };
+  }
+
+  private armWaiting(dialog: Dialog): void {
+    const { setup } = dialog;
+    if (setup === undefined) return;
+    setup.waiting = setTimeout(() => this.showWaiting(dialog), CALL_WAITING_GRACE_MS);
+    setup.waiting.unref();
+  }
+
+  private showWaiting(dialog: Dialog): void {
+    if (this.tracks.get(dialog.callId)?.progress === PROGRESS_TRYING) this.setProgress(dialog.callId, PROGRESS_WAITING);
+  }
+
+  private stopSetupGuard(dialog: Dialog): void {
+    const { setup } = dialog;
+    dialog.setup = undefined;
+    clearTimeout(setup?.expiry);
+    clearTimeout(setup?.waiting);
+  }
+
+  /** No final response in time: tell the user why, end the call, and CANCEL the INVITE (RFC 3261 9.1). */
+  private expireSetup(dialog: Dialog): void {
+    this.stopSetupGuard(dialog);
+    const { callId } = dialog;
+    this.recordReason(callId, END_REASON_SETUP_TIMEOUT, {
+      level: 'warn',
+      params: { callId, seconds: String(CALL_SETUP_TIMEOUT_MS / 1000) }
+    });
+    this.dispatchCall(callId, { type: 'hangup' });
+    this.cancel(dialog).catch(this.logSend);
+  }
+
+  /** A challenge we answer with credentials is not the end of setup: the guard keeps its original deadline. */
   private onInviteRejected(dialog: Dialog, response: SipResponse): void {
     const { pending } = dialog;
     dialog.pending = undefined;
@@ -773,6 +873,7 @@ export class SipEngine {
   private onAnswered(dialog: Dialog, response: SipResponse): void {
     const cseq = Number.parseInt(first(response.headers, 'cseq'), 10);
     dialog.pending = undefined;
+    this.stopSetupGuard(dialog);
     this.adoptRemote(dialog, response);
     this.sendAckTo(dialog, buildDialogRequest(dialog, 'ACK', cseq, this.deps.ids.newBranch()));
     const negotiated = negotiateBody(response.body);
@@ -811,6 +912,7 @@ export class SipEngine {
 
   private async cancel(dialog: Dialog): Promise<void> {
     dialog.cancelled = true;
+    this.stopSetupGuard(dialog);
     const request = dialog.pending?.request;
     dialog.pending?.stop();
     if (request === undefined) return void this.dialogs.delete(dialog.callId);
@@ -823,6 +925,7 @@ export class SipEngine {
   private releaseDialog(dialog: Dialog): void {
     this.dialogs.delete(dialog.callId);
     dialog.pending?.stop();
+    this.stopSetupGuard(dialog);
     this.stopMedia(dialog);
   }
 
@@ -985,9 +1088,27 @@ export class SipEngine {
     this.noteMappedAddress(entry, known, connection.publicAddress);
     if (!result.ok) return this.fail(entry, result.errorKey, result.status === 408);
     this.note(account.id, 'logs.event.registered', { params: { expires: String(result.expiresIn) } });
+    this.trackSharing(entry, result);
     if (entry.snapshot.state === 'registering') this.dispatchRegistration(entry, { type: 'registered' });
     const delay = Math.max(MIN_REFRESH_MS, Math.floor(result.expiresIn * REFRESH_FRACTION * 1000));
     entry.timer = setTimeout(() => void this.refresh(entry), delay);
+  }
+
+  /** Remembers who else holds the account and warns once per change, not on every refresh. */
+  private trackSharing(entry: Entry, result: AcceptedRegistration): void {
+    const { sharing, otherContacts } = result;
+    const contacts = otherContacts.join(', ');
+    const key = `${sharing.others}|${sharing.displaced}|${contacts}`;
+    entry.sharing = { others: sharing.others, displaced: sharing.displaced };
+    if (entry.sharingKey === key) return;
+    entry.sharingKey = key;
+    if (sharing.others > 0) this.note(entry.account.id, 'logs.event.shared', { level: 'warn', params: { contacts } });
+    if (sharing.displaced) this.note(entry.account.id, 'logs.event.displaced', { level: 'warn' });
+  }
+
+  private forgetSharing(entry: Entry): void {
+    entry.sharing = undefined;
+    entry.sharingKey = undefined;
   }
 
   private noteMappedAddress(entry: Entry, before: SipConnection['publicAddress'], after: SipConnection['publicAddress']): void {
@@ -997,6 +1118,7 @@ export class SipEngine {
 
   private fail(entry: Entry, reason: string, retryable: boolean): void {
     if (entry.stopped) return;
+    this.forgetSharing(entry);
     this.clearTimer(entry);
     this.dropConnection(entry);
     this.dispatchRegistration(entry, { type: 'failed', reason });
@@ -1206,6 +1328,7 @@ export class SipEngine {
       stage: 'early',
       media: undefined,
       pending: undefined,
+      setup: undefined,
       held: false,
       muted: false,
       cancelled: false,

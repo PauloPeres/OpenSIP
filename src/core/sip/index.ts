@@ -7,3 +7,4 @@ export * from './sdp';
 export * from './transport';
 export * from './message';
 export * from './digest';
+export * from './bindings';

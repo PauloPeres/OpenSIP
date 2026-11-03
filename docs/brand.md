@@ -1,4 +1,4 @@
-# OpenSIP brand / Identidade visual
+# Open SIP Phone brand / Identidade visual
 
 ## English
 
@@ -6,7 +6,7 @@
 
 **Files** (all hand-written SVG, no fonts, no rasters)
 - `assets/logo-mark.svg` - icon-only mark, transparent background, `viewBox="0 0 64 64"`, accent colour.
-- `assets/logo-wordmark.svg` - mark + "OpenSIP", `viewBox="0 0 240 64"`. Lettering is drawn as stroked geometric paths (stroke width 4.5), so it renders identically everywhere. Text colour follows `prefers-color-scheme` (ink on light, off-white on dark) when the SVG is opened in a browser or used via `<img>`.
+- `assets/logo-wordmark.svg` - mark + "Open SIP Phone", `viewBox="0 0 398 64"`. Lettering is drawn as stroked geometric paths (stroke width 4.5), so it renders identically everywhere. Text colour follows `prefers-color-scheme` (ink on light, off-white on dark) when the SVG is opened in a browser or used via `<img>`.
 - `assets/logo.svg` - primary lockup; currently identical to the wordmark.
 - `build/icon.png` (1024), `build/icon.iconset/`, `build/icon.icns` - generated app icon (white mark on an accent tile). Do not edit by hand.
 
@@ -43,7 +43,7 @@ Suggested `package.json` script: `"render:icons": "electron scripts/assets/rende
 
 **Arquivos** (SVG escrito à mão, sem fontes nem rasters)
 - `assets/logo-mark.svg` - somente a marca, fundo transparente, `viewBox="0 0 64 64"`, cor de destaque.
-- `assets/logo-wordmark.svg` - marca + "OpenSIP", `viewBox="0 0 240 64"`. As letras são caminhos geométricos com traço (largura 4,5), por isso renderizam igual em qualquer lugar. A cor do texto segue `prefers-color-scheme` (tinta no claro, off-white no escuro).
+- `assets/logo-wordmark.svg` - marca + "Open SIP Phone", `viewBox="0 0 398 64"`. As letras são caminhos geométricos com traço (largura 4,5), por isso renderizam igual em qualquer lugar. A cor do texto segue `prefers-color-scheme` (tinta no claro, off-white no escuro).
 - `assets/logo.svg` - versão principal; hoje idêntica ao wordmark.
 - `build/icon.png` (1024), `build/icon.iconset/`, `build/icon.icns` - ícone do app gerado (marca branca sobre quadrado de destaque). Não editar à mão.
 

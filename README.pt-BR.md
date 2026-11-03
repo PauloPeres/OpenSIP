@@ -1,4 +1,4 @@
-# OpenSIP
+# Open SIP Phone
 
 [![ci](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg)](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml)
 [![licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-blue.svg)](LICENSE)
@@ -31,7 +31,7 @@ automática.
 ## Transporte: você dá o domínio, ele descobre o resto
 
 Não se pede porta, protocolo nem URL de WebSocket. Informe usuário, senha e domínio, e
-o OpenSIP acha o caminho:
+o Open SIP Phone acha o caminho:
 
 1. Consulta os registros SRV definidos pelas RFC 3263 e RFC 7118 — `_sips._tcp`,
    `_sips._wss`, `_sip._tcp`, `_sip._ws`, `_sip._udp`.
@@ -54,9 +54,9 @@ Se precisar fixar um caminho específico, preencha o campo opcional de servidor 
 Baixe o instalador da sua plataforma na página de
 [Releases](https://github.com/PauloPeres/OpenSIP/releases):
 
-- **macOS** — `OpenSIP-<versão>-mac-<arch>.dmg` (Intel e Apple Silicon)
-- **Windows** — `OpenSIP-<versão>-win-<arch>.exe`
-- **Linux** — `OpenSIP-<versão>-linux-x64.AppImage` ou `.deb`
+- **macOS** — `Open SIP Phone-<versão>-mac-<arch>.dmg` (Intel e Apple Silicon)
+- **Windows** — `Open SIP Phone-<versão>-win-<arch>.exe`
+- **Linux** — `Open SIP Phone-<versão>-linux-x64.AppImage` ou `.deb`
 
 O aplicativo procura atualizações ao iniciar e a cada seis horas, e as instala ao sair.
 
@@ -164,4 +164,4 @@ passar. Veja [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licença
 
-[MIT](LICENSE) © Contribuidores do OpenSIP
+[MIT](LICENSE) © Contribuidores do Open SIP Phone

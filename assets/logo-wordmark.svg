@@ -1,13 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 64" width="240" height="64" role="img" aria-label="OpenSIP">
-  <style>.t{stroke:#0B1F26}@media (prefers-color-scheme:dark){.t{stroke:#F4F7F7}}</style>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 398 64" width="398" height="64" role="img" aria-label="Open SIP Phone">
+  <style>.t{color:#0B1F26}@media (prefers-color-scheme:dark){.t{color:#F4F7F7}}</style>
   <path fill="#0E9F8E" fill-rule="evenodd" d="M13.98 42.62A22 22 0 1 1 32 52L10 57Z M18 27.5a3.5 3.5 0 0 1 7 0v5a3.5 3.5 0 0 1-7 0Z M28.5 21.5a3.5 3.5 0 0 1 7 0v17a3.5 3.5 0 0 1-7 0Z M39 25.5a3.5 3.5 0 0 1 7 0v9a3.5 3.5 0 0 1-7 0Z"/>
-  <g class="t" fill="none" stroke-width="4.5" stroke-linejoin="round">
+  <g class="t" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round">
+    <!-- Open -->
     <circle cx="82" cy="30" r="11"/>
-    <path d="M107 27V53"/><circle cx="114" cy="34" r="7"/>
-    <path d="M134 34H148A7 7 0 1 0 146.4 38.5"/>
-    <path d="M160 27V41M160 34A7 7 0 0 1 174 34V41"/>
-    <path d="M198.2 21A5.5 5.5 0 1 0 194 30A5.5 5.5 0 1 1 189.8 39"/>
-    <path d="M210 19V41"/>
-    <path d="M222 19V41M222 19H227A6 6 0 0 1 227 31H221"/>
+    <g transform="translate(106 0)"><path d="M0 27V53"/><circle cx="7" cy="34" r="7"/></g>
+    <g transform="translate(133 0)"><path d="M0 34H14A7 7 0 1 0 12.4 38.5"/></g>
+    <g transform="translate(160 0)"><path d="M0 27V41M0 34A7 7 0 0 1 14 34V41"/></g>
+    <!-- SIP -->
+    <g transform="translate(9.5 0)"><path d="M198.2 21A5.5 5.5 0 1 0 194 30A5.5 5.5 0 1 1 189.8 39"/></g>
+    <path d="M222 19V41"/>
+    <g transform="translate(235 0)"><path d="M0 41V19H5A6 6 0 0 1 5 31H0"/></g>
+    <!-- Phone -->
+    <g transform="translate(270 0)"><path d="M0 41V19H5A6 6 0 0 1 5 31H0"/></g>
+    <g transform="translate(294 0)"><path d="M0 19V41M0 34A7 7 0 0 1 14 34V41"/></g>
+    <circle cx="328" cy="34" r="7"/>
+    <g transform="translate(348 0)"><path d="M0 27V41M0 34A7 7 0 0 1 14 34V41"/></g>
+    <g transform="translate(375 0)"><path d="M0 34H14A7 7 0 1 0 12.4 38.5"/></g>
   </g>
 </svg>

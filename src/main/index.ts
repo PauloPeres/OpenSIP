@@ -33,16 +33,18 @@ function isAppUrl(url: string): boolean {
   return url.startsWith('file://') || (devUrl !== undefined && url.startsWith(devUrl));
 }
 
-/** Microphone only, audio only, only for the app's own hidden media window loaded from the app. */
+/** Audio-only microphone capture and notifications, for pages loaded from the app itself. The main window needs this for onboarding, the media window for calls. */
 function allowMicrophone(): void {
   const { defaultSession } = session;
-  defaultSession.setPermissionRequestHandler((contents: WebContents, permission, callback, details) => {
+  defaultSession.setPermissionRequestHandler((_contents: WebContents, permission, callback, details) => {
     const audioOnly = (details as { mediaTypes?: readonly string[] }).mediaTypes?.every((type) => type === 'audio') ?? true;
-    callback(permission === 'media' && audioOnly && isMediaWebContents(contents) && isAppUrl(details.requestingUrl));
+    const allowed = permission === 'notifications' || (permission === 'media' && audioOnly);
+    callback(allowed && isAppUrl(details.requestingUrl));
   });
-  defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => {
+  defaultSession.setPermissionCheckHandler((_contents, permission, _origin, details) => {
     const mediaType = (details as { mediaType?: string }).mediaType;
-    return permission === 'media' && mediaType !== 'video' && isMediaWebContents(contents) && isAppUrl(details.requestingUrl ?? '');
+    const allowed = permission === 'notifications' || (permission === 'media' && mediaType !== 'video');
+    return allowed && isAppUrl(details.requestingUrl ?? '');
   });
 }
 

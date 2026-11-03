@@ -9,6 +9,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/unit/**/*.spec.ts'],
+    exclude: ['tests/unit/live-*.spec.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'lcov'],

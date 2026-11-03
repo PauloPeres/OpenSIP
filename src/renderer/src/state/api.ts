@@ -25,6 +25,7 @@ const OFFLINE_API: OpenSipApi = {
   setDebugLogging: (enabled) => Promise.resolve(enabled),
   clearLogs: none,
   openSystemSettings: none,
+  micPermission: () => Promise.resolve('unknown'),
   onSnapshot: subscribeNone,
   onUpdateStatus: subscribeNone
 };

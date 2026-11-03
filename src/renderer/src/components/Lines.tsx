@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { callStateKey } from '@core/sip';
 import type { AccountView, CallView } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
-import { isPending, progressKey } from '../state/callProgress';
+import { isPending, isWaiting, progressKey } from '../state/callProgress';
 import { formatDuration } from '../state/format';
 import type { AppActions } from '../state/useAppState';
 import { isIncomingRing } from '../state/useLines';
@@ -17,6 +17,8 @@ export interface LineEnv {
   readonly accounts: readonly AccountView[];
   readonly actions: AppActions;
   readonly now: number;
+  /** When each call started being set up, so a call that is not answered yet can show how long it has waited. */
+  readonly setupStarts: ReadonlyMap<string, number>;
 }
 
 function accountOf(env: LineEnv, line: Line): { readonly view: AccountView | undefined; readonly index: number } {
@@ -28,13 +30,16 @@ function Lamp({ state }: { readonly state: string }): JSX.Element {
   return <span className={cx('lamp', `lamp-${state}`)} aria-hidden="true" />;
 }
 
-function CallTimer({ view, now }: { readonly view: CallView; readonly now: number }): JSX.Element | null {
+/** Counts up from the answer, or from the start of setup while the call is still being put through. */
+function CallTimer({ view, env }: { readonly view: CallView; readonly env: LineEnv }): JSX.Element | null {
   const { t } = useTranslation();
-  if (view.connectedAt === undefined) return null;
+  const pending = isPending(view);
+  const since = view.connectedAt ?? (pending ? env.setupStarts.get(view.call.id) : undefined);
+  if (since === undefined) return null;
   return (
-    <span className="timer" role="timer">
+    <span className={cx('timer', pending && 'timer-setup')} role="timer">
       <span className="sr-only">{t('calls.duration')} </span>
-      {formatDuration(now - view.connectedAt)}
+      {formatDuration(env.now - since)}
     </span>
   );
 }
@@ -67,15 +72,20 @@ function LineMeta({ line, env }: { readonly line: Line; readonly env: LineEnv })
   );
 }
 
+const GIVES_UP = 'calls.progress.givesUp'; // i18n-exempt: translation key
+
 function Progress({ view }: { readonly view: CallView }): JSX.Element | null {
   const { t } = useTranslation();
   const key = progressKey(view);
   if (key === null) return null;
   return (
-    <span className={cx('progress', isPending(view) && 'progress-pending')}>
-      {isPending(view) ? <i className="spinner" aria-hidden="true" /> : null}
-      {t(key)}
-    </span>
+    <>
+      <span className={cx('progress', isPending(view) && 'progress-pending')}>
+        {isPending(view) ? <i className="spinner" aria-hidden="true" /> : null}
+        {t(key)}
+      </span>
+      {isWaiting(view) ? <span className="progress-hint">{t(GIVES_UP)}</span> : null}
+    </>
   );
 }
 
@@ -92,7 +102,7 @@ function LineSummary({ line, env }: { readonly line: Line; readonly env: LineEnv
       </span>
       <span className="line-state">
         <span className={cx('state', `state-${call.state}`)}>{t(callStateKey(call.state))}</span>
-        <CallTimer view={line.view} now={env.now} />
+        <CallTimer view={line.view} env={env} />
       </span>
     </>
   );

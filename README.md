@@ -1,4 +1,4 @@
-# OpenSIP
+# Open SIP Phone
 
 [![ci](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg)](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -27,7 +27,7 @@ Linux, from a single codebase, with automatic updates.
 
 ## Transport: you give it a domain, it works out the rest
 
-You are not asked for a port, a protocol or a WebSocket URL. Give OpenSIP a username,
+You are not asked for a port, a protocol or a WebSocket URL. Give Open SIP Phone a username,
 a password and a domain, and it finds the way in:
 
 1. It queries the SRV records defined by RFC 3263 and RFC 7118 — `_sips._tcp`,
@@ -50,9 +50,9 @@ If you need to pin one specific path, set the optional server field under **Adva
 Download the installer for your platform from the
 [Releases](https://github.com/PauloPeres/OpenSIP/releases) page:
 
-- **macOS** — `OpenSIP-<version>-mac-<arch>.dmg` (Intel and Apple Silicon)
-- **Windows** — `OpenSIP-<version>-win-<arch>.exe`
-- **Linux** — `OpenSIP-<version>-linux-x64.AppImage` or `.deb`
+- **macOS** — `Open SIP Phone-<version>-mac-<arch>.dmg` (Intel and Apple Silicon)
+- **Windows** — `Open SIP Phone-<version>-win-<arch>.exe`
+- **Linux** — `Open SIP Phone-<version>-linux-x64.AppImage` or `.deb`
 
 The app checks for updates on startup and every six hours, and installs them on quit.
 
@@ -158,4 +158,4 @@ Gherkin scenario, watch it fail for the right reason, then make it pass. See
 
 ## License
 
-[MIT](LICENSE) © OpenSIP Contributors
+[MIT](LICENSE) © Open SIP Phone Contributors

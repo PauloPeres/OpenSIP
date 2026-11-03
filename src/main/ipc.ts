@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, systemPreferences } from 'electron';
 import { createDiagnosticsLog } from '@core/diagnostics';
 import { isSupportedLocale, resolveLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
@@ -19,7 +19,7 @@ import {
 } from '@core/sip';
 import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
 import { IPC, isDtmfDigit } from '../shared/api';
-import type { AccountDraft, AccountView, AppSnapshot, DialResult, SaveAccountResult } from '../shared/api';
+import type { AccountDraft, AccountView, AppSnapshot, DialResult, MicAccess, SaveAccountResult } from '../shared/api';
 import { loadState, saveState } from './account-storage';
 import { createMediaBridge } from './media';
 import { SipEngine } from './sip/engine';
@@ -45,17 +45,23 @@ class Controller {
   private cooling = false;
   private dirty = false;
 
-  snapshot(): AppSnapshot {
+  private accountViews(): AccountView[] {
     const registrations = this.engine.getRegistrations();
     const transports = this.engine.getTransports();
-    const accounts = listAccounts(this.store).map((account): AccountView => {
+    const sharing = this.engine.getSharing();
+    return listAccounts(this.store).map((account): AccountView => {
       const transport = transports[account.id]?.transport;
       return {
         account,
         registration: registrations[account.id] ?? initialRegistration,
-        ...(transport === undefined ? {} : { transport })
+        ...(transport === undefined ? {} : { transport }),
+        ...(sharing[account.id] === undefined ? {} : { sharing: sharing[account.id] })
       };
     });
+  }
+
+  snapshot(): AppSnapshot {
+    const accounts = this.accountViews();
     return {
       accounts,
       calls: this.engine.getCallViews(),
@@ -238,6 +244,15 @@ function registerSystemSettingsHandler(): void {
   });
 }
 
+/** The OS's own answer; only macOS and Windows keep one, elsewhere nothing gates the device. No argument is read. */
+function readMicAccess(): MicAccess {
+  return process.platform === 'darwin' || process.platform === 'win32' ? systemPreferences.getMediaAccessStatus('microphone') : 'granted';
+}
+
+function registerMicPermissionHandler(): void {
+  ipcMain.handle(IPC.micPermission, (): MicAccess => readMicAccess());
+}
+
 function registerLogHandlers(controller: Controller): void {
   ipcMain.handle(IPC.setDebugLogging, (_event, enabled: unknown) => controller.setDebugLogging(enabled === true));
   ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
@@ -268,6 +283,7 @@ function registerHandlers(controller: Controller): void {
   registerMediaHandlers(controller);
   registerLogHandlers(controller);
   registerSystemSettingsHandler();
+  registerMicPermissionHandler();
 }
 
 export async function registerIpc(): Promise<void> {

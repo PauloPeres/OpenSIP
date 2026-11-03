@@ -169,7 +169,7 @@ describe('register', () => {
 
   it('succeeds on 200 and reports the Expires header', async () => {
     const connection = fakeConnection((request) => reply(request, 200, { expires: ['300'] }));
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 300 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 300 });
     expect(connection.sent).toHaveLength(1);
   });
 
@@ -177,19 +177,19 @@ describe('register', () => {
     const connection = fakeConnection((request) =>
       reply(request, 200, { contact: ['<sip:1001@10.0.0.5:51234>;expires=240'] })
     );
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 240 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 240 });
   });
 
   it('falls back to the requested expiry', async () => {
     const connection = fakeConnection((request) => reply(request, 200));
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 600 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 600 });
   });
 
   it('ignores a non-numeric Expires and a Contact without expires', async () => {
     const connection = fakeConnection((request) =>
       reply(request, 200, { expires: ['soon'], contact: ['<sip:1001@10.0.0.5>'] })
     );
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 600 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 600 });
   });
 
   it('answers a 401 challenge with the right credentials and a bumped CSeq', async () => {
@@ -197,7 +197,7 @@ describe('register', () => {
       n === 1 ? reply(request, 401, { 'www-authenticate': [CHALLENGE] }) : reply(request, 200)
     );
     const result = await run(connection);
-    expect(result).toEqual({ ok: true, expiresIn: 600 });
+    expect(result).toMatchObject({ ok: true, expiresIn: 600 });
     const [first, second] = connection.sent;
     expect(first?.headers['cseq']).toEqual(['1 REGISTER']);
     expect(second?.headers['cseq']).toEqual(['2 REGISTER']);
@@ -235,7 +235,7 @@ describe('register', () => {
     const connection = fakeConnection((request, n) =>
       n < 3 ? reply(request, 401, { 'www-authenticate': [challengeWith(`nonce${n}`)] }) : reply(request, 200)
     );
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 600 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 600 });
     expect(connection.sent.map((r) => r.headers['cseq']?.[0])).toEqual([
       '1 REGISTER',
       '2 REGISTER',
@@ -326,7 +326,7 @@ describe('register', () => {
         return () => listeners.delete(listener);
       }
     };
-    await expect(run(connection)).resolves.toEqual({ ok: true, expiresIn: 600 });
+    await expect(run(connection)).resolves.toMatchObject({ ok: true, expiresIn: 600 });
     expect(listeners.size).toBe(0);
   });
 
@@ -395,6 +395,68 @@ describe('register', () => {
       const bare = fakeConnection((request) => reply(request, 200));
       await run(bare);
       expect(bare.publicAddress).toBeUndefined();
+    });
+  });
+
+  describe('contact bindings', () => {
+    const ours = '<sip:1001@10.0.0.5:51234;transport=tcp>;expires=600';
+    const theirs = '<sip:1001@203.0.113.7:5070;transport=udp>;expires=300';
+
+    it('reports no sharing when the 200 lists only our own contact', async () => {
+      const connection = fakeConnection((request) => reply(request, 200, { contact: [ours] }));
+      const result = await run(connection);
+      expect(result).toMatchObject({ ok: true, sharing: { others: 0, displaced: false }, otherContacts: [] });
+    });
+
+    it('reports another device that shares the account while ours is still bound', async () => {
+      const connection = fakeConnection((request) => reply(request, 200, { contact: [ours, theirs] }));
+      const result = await run(connection);
+      expect(result).toMatchObject({
+        sharing: { others: 1, displaced: false },
+        otherContacts: ['sip:1001@203.0.113.7:5070']
+      });
+    });
+
+    it('reports displacement when only someone else is bound', async () => {
+      const connection = fakeConnection((request) => reply(request, 200, { contact: [theirs] }));
+      const result = await run(connection);
+      expect(result).toMatchObject({ sharing: { others: 1, displaced: true } });
+    });
+
+    it('does not cry wolf when the 200 carries no Contact at all', async () => {
+      const connection = fakeConnection((request) => reply(request, 200));
+      const result = await run(connection);
+      expect(result).toMatchObject({ sharing: { others: 0, displaced: false }, otherContacts: [] });
+    });
+
+    it('compares against the contact actually sent on the authenticated retry', async () => {
+      const natVia = 'SIP/2.0/TCP 10.0.0.5:51234;branch=z9hG4bKbranch1;received=203.0.113.91;rport=61878';
+      const mapped = '<sip:1001@203.0.113.91:61878;transport=tcp>;expires=600';
+      const connection = fakeConnection((request, n) =>
+        n === 1
+          ? reply(request, 401, { via: [natVia], 'www-authenticate': [CHALLENGE] })
+          : reply(request, 200, { contact: [mapped] })
+      );
+      const result = await run(connection);
+      expect(result).toMatchObject({ sharing: { others: 0, displaced: false } });
+    });
+
+    it('compares against the NAT-mapped address of an earlier registration', async () => {
+      const natVia = 'SIP/2.0/TCP 10.0.0.5:51234;received=203.0.113.91;rport=61878';
+      const connection = fakeConnection((request) => reply(request, 200, { via: [natVia], contact: [ours] }));
+      await run(connection);
+      const second = await run(connection);
+      expect(second).toMatchObject({ sharing: { others: 1, displaced: true } });
+    });
+
+    it('prefers an explicit public address over the local one', async () => {
+      const mapped = '<sip:1001@198.51.100.1:4000>;expires=600';
+      const connection = fakeConnection((request) => reply(request, 200, { contact: [mapped] }));
+      const result = await register(
+        { ...params(), publicAddress: { host: '198.51.100.1', port: 4000 } },
+        { connection, ids: sequentialIds(), hash: md5 }
+      );
+      expect(result).toMatchObject({ sharing: { others: 0, displaced: false } });
     });
   });
 

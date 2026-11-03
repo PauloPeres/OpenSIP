@@ -4,6 +4,7 @@ import type { AccountView, CallView } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import { displayState, stateKey } from '../state/accountState';
 import { RegistrationNote } from './RegistrationNote';
+import { SharingNote } from './SharingNote';
 import { Avatar, Badge } from './ui/Badge';
 import { Breakable } from './ui/Breakable';
 import { Button } from './ui/Button';
@@ -82,6 +83,7 @@ function AccountRow({ view, index, onEdit, onRemove, onToggle, refusedId, busy }
       <Badge tone={displayState(view)} label={t(stateKey(view))} />
       <Button label={t('accounts.edit')} onClick={() => onEdit(account)} />
       <Button label={t('accounts.remove')} variant="danger" onClick={() => onRemove(account)} />
+      <SharingNote view={view} />
       <PowerSwitch view={view} onToggle={onToggle} refused={refusedId === account.id} busy={busy} />
     </li>
   );

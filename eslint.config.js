@@ -3,7 +3,7 @@ import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
-  { ignores: ['out/**', 'dist/**', 'coverage/**', 'reports/**', 'node_modules/**'] },
+  { ignores: ['out/**', 'dist/**', 'coverage/**', 'reports/**', 'node_modules/**', 'tests/unit/live-*.spec.ts'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -29,7 +29,7 @@ export default tseslint.config(
     rules: { 'no-undef': 'off' }
   },
   {
-    files: ['tests/**/*.ts', 'scripts/**/*.mjs', '*.config.ts', 'cucumber.cjs'],
+    files: ['tests/**/*.ts', 'scripts/**/*.mjs', '*.config.ts', '**/*.cjs'],
     languageOptions: {
       globals: {
         console: 'readonly',
@@ -53,5 +53,13 @@ export default tseslint.config(
       'no-console': 'off',
       complexity: 'off'
     }
+  },
+  {
+    // CommonJS scripts (electron-builder hooks, cucumber config) are loaded with
+    // require(), so require()/module.exports are correct and the TS import rule
+    // does not apply. They are still linted with the rest of the recommended set.
+    files: ['**/*.cjs'],
+    languageOptions: { sourceType: 'commonjs' },
+    rules: { '@typescript-eslint/no-require-imports': 'off' }
   }
 );

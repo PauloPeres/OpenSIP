@@ -1,13 +1,17 @@
 import {
+  analyseBindings,
   buildAuthorization,
   headerValue,
   headerValues,
   isResponse,
+  otherBindings,
   parseChallenge,
   parseParameters,
   withHeader
 } from '@core/sip';
 import type {
+  BindingAnalysis,
+  BindingOwner,
   DigestChallenge,
   SipAccount,
   SipHeaders,
@@ -39,8 +43,17 @@ export interface RegisterParams {
   readonly fromTag?: string;
 }
 
+export interface AcceptedRegistration {
+  ok: true;
+  expiresIn: number;
+  /** What the 200 OK's Contact list says about other devices holding this account. */
+  sharing: BindingAnalysis;
+  /** Normalised URIs of the other live bindings, for the diagnostics log. */
+  otherContacts: readonly string[];
+}
+
 export type RegisterResult =
-  | { ok: true; expiresIn: number }
+  | AcceptedRegistration
   | { ok: false; status: number; errorKey: string };
 
 type AuthHeaderName = 'authorization' | 'proxy-authorization';
@@ -70,10 +83,20 @@ const STATUS_ERROR_KEYS: Readonly<Record<number, string>> = {
   408: ERROR_KEYS.timeout
 };
 
+function localAddressOf(params: RegisterParams): { host: string; port: number } {
+  return params.localAddress ?? { host: params.candidate.host, port: params.candidate.port };
+}
+
+/** The address our Contact advertises: the NAT-mapped one when known. */
+export function contactOwner(params: RegisterParams): BindingOwner {
+  const { host, port } = params.publicAddress ?? localAddressOf(params);
+  return { host, port, user: params.account.username };
+}
+
 function registerHeaders(params: RegisterParams, ids: IdFactory, cseq: number): SipHeaders {
   const { account, candidate, expires } = params;
-  const local = params.localAddress ?? { host: candidate.host, port: candidate.port };
-  const seen = params.publicAddress ?? local;
+  const local = localAddressOf(params);
+  const seen = contactOwner(params);
   return {
     via: [`SIP/2.0/${candidate.transport.toUpperCase()} ${local.host}:${local.port};branch=${ids.newBranch()};rport`],
     'max-forwards': ['70'],
@@ -185,11 +208,22 @@ function grantedExpiry(response: SipResponse, requested: number): number {
   return fromContact ?? requested;
 }
 
-function toResult(response: SipResponse | undefined, requested: number): RegisterResult {
+function accepted(response: SipResponse, requested: number, owner: BindingOwner): RegisterResult {
+  const contacts = headerValues(response.headers, 'contact');
+  return {
+    ok: true,
+    expiresIn: grantedExpiry(response, requested),
+    sharing: analyseBindings(contacts, owner),
+    otherContacts: otherBindings(contacts, owner).map((binding) => binding.uri)
+  };
+}
+
+/** `sent` is who the request we are answering claimed to be, so the Contact list is read against it. */
+function toResult(response: SipResponse | undefined, requested: number, sent: BindingOwner): RegisterResult {
   if (response === undefined) {
     return { ok: false, status: STATUS_TIMEOUT, errorKey: ERROR_KEYS.timeout };
   }
-  if (response.status === 200) return { ok: true, expiresIn: grantedExpiry(response, requested) };
+  if (response.status === 200) return accepted(response, requested, sent);
   const errorKey = STATUS_ERROR_KEYS[response.status] ?? ERROR_KEYS.rejected;
   return { ok: false, status: response.status, errorKey };
 }
@@ -259,10 +293,11 @@ async function authenticate(
   let usedNonce: string | undefined;
   for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt += 1) {
     const credentials = credentialsFor(challenge, params, deps);
-    if (credentials === undefined) return toResult(challenge, params.expires);
+    if (credentials === undefined) return toResult(challenge, params.expires, contactOwner(params));
     if (credentials.nonce === usedNonce && !credentials.stale) return unauthorized(challenge.status);
-    const response = await exchange(deps, authenticatedRequest(params, deps, attempt + 1, credentials));
-    if (!isChallenge(response)) return toResult(response, params.expires);
+    const sent = withAddresses(params, deps);
+    const response = await exchange(deps, authenticatedRequest(sent, deps, attempt + 1, credentials));
+    if (!isChallenge(response)) return toResult(response, params.expires, contactOwner(sent));
     challenge = response;
     usedNonce = credentials.nonce;
   }
@@ -270,12 +305,12 @@ async function authenticate(
 }
 
 function authenticatedRequest(
-  params: RegisterParams,
+  sent: RegisterParams,
   deps: RegistrarDeps,
   cseq: number,
   credentials: Credentials
 ): SipRequest {
-  return buildRegisterRequest(withAddresses(params, deps), deps.ids, cseq, credentials.value, credentials.header);
+  return buildRegisterRequest(sent, deps.ids, cseq, credentials.value, credentials.header);
 }
 
 /** Evaluated per request so an address learned from the first response is used by the next. */
@@ -297,7 +332,8 @@ export async function register(params: RegisterParams, deps: RegistrarDeps): Pro
     callId: params.callId ?? deps.ids.newCallId(local.host),
     fromTag: params.fromTag ?? deps.ids.newTag()
   };
-  const first = await exchange(deps, buildRegisterRequest(withAddresses(stable, deps), deps.ids, 1));
+  const sent = withAddresses(stable, deps);
+  const first = await exchange(deps, buildRegisterRequest(sent, deps.ids, 1));
   if (isChallenge(first)) return authenticate(first, stable, deps);
-  return toResult(first, params.expires);
+  return toResult(first, params.expires, contactOwner(sent));
 }

@@ -21,6 +21,8 @@ import { useLines } from './state/useLines';
 import type { LinesModel } from './state/useLines';
 import { useIncomingNotification } from './state/useIncomingNotification';
 import { useNow } from './state/useNow';
+import { useSetupClock } from './state/useSetupClock';
+import { isPending } from './state/callProgress';
 import { useOnboarding } from './state/useOnboarding';
 import { useRingtone } from './state/useRingtone';
 import { useStoredFlag } from './state/storage';
@@ -57,11 +59,11 @@ function AccountsView({ state }: { readonly state: AppState }): JSX.Element {
   );
 }
 
-function PhoneView({ state, model, now }: { readonly state: AppState; readonly model: LinesModel; readonly now: number }): JSX.Element {
+function PhoneView({ state, model, now, setupStarts }: Omit<ViewProps, 'view' | 'ringtone'>): JSX.Element {
   const { snapshot, actions } = state;
   return (
     <div className="phone">
-      <LinesPanel model={model} env={{ accounts: snapshot.accounts, actions, now }} />
+      <LinesPanel model={model} env={{ accounts: snapshot.accounts, actions, now, setupStarts }} />
       <Dialer accounts={snapshot.accounts} dial={actions.dial} onDialed={model.focus} />
     </div>
   );
@@ -72,19 +74,21 @@ interface ViewProps {
   readonly state: AppState;
   readonly model: LinesModel;
   readonly now: number;
+  readonly setupStarts: ReadonlyMap<string, number>;
   readonly ringtone: RingtonePref;
 }
 
-function ViewContent({ view, state, model, now, ringtone }: ViewProps): JSX.Element {
+function ViewContent({ view, state, model, now, setupStarts, ringtone }: ViewProps): JSX.Element {
   if (view === 'accounts') return <AccountsView state={state} />;
   if (view === 'logs') return <LogsPanel snapshot={state.snapshot} actions={state.actions} />;
   if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} />;
-  return <PhoneView state={state} model={model} now={now} />;
+  return <PhoneView state={state} model={model} now={now} setupStarts={setupStarts} />;
 }
 
 interface CallFlow {
   readonly model: LinesModel;
   readonly now: number;
+  readonly setupStarts: ReadonlyMap<string, number>;
   readonly announcement: string;
   readonly ringtone: RingtonePref;
   readonly answer: (callId: string) => void;
@@ -92,7 +96,8 @@ interface CallFlow {
 
 function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
   const model = useLines(state.snapshot.calls);
-  const now = useNow(model.lines.some((l) => l.view.connectedAt !== undefined));
+  const now = useNow(model.lines.some((l) => l.view.connectedAt !== undefined || isPending(l.view)));
+  const setupStarts = useSetupClock(model.lines);
   const announcement = useAnnouncement(model.lines);
   const [enabled, setEnabled] = useStoredFlag('opensip.ringtone', true);
   useRingtone(model.lines, enabled);
@@ -102,7 +107,7 @@ function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
     model.focus(id);
     showCalls();
   };
-  return { model, now, announcement, ringtone: { enabled, set: setEnabled }, answer };
+  return { model, now, setupStarts, announcement, ringtone: { enabled, set: setEnabled }, answer };
 }
 
 function Workspace({ state }: { readonly state: AppState }): JSX.Element {
@@ -118,7 +123,7 @@ function Workspace({ state }: { readonly state: AppState }): JSX.Element {
         <StatusBar accounts={accounts} calls={state.snapshot.calls} />
         {state.failed ? <p className="notice" role="alert">{t('error.unexpected')}</p> : null}
         <main className="view">
-          <ViewContent view={view} state={state} model={flow.model} now={flow.now} ringtone={flow.ringtone} />
+          <ViewContent view={view} state={state} model={flow.model} now={flow.now} setupStarts={flow.setupStarts} ringtone={flow.ringtone} />
         </main>
       </div>
       <div className="sr-only" role="status" aria-live="polite">{flow.announcement}</div>

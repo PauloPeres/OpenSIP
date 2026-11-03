@@ -29,14 +29,20 @@ export const IPC = {
   setDebugLogging: 'opensip:logs:debug',
   clearLogs: 'opensip:logs:clear',
   openSystemSettings: 'opensip:system:settings',
+  micPermission: 'opensip:system:mic',
   updateStatus: 'opensip:update:status'
 } as const;
+
+/** What the operating system says about microphone access (Electron's `getMediaAccessStatus`). */
+export type MicAccess = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
 
 export interface AccountView {
   readonly account: SipAccount;
   readonly registration: RegistrationSnapshot;
   /** The transport discovered (or configured) for this account, once known. */
   readonly transport?: SipTransport;
+  /** What the registrar reported about other devices holding this same account. */
+  readonly sharing?: AccountSharing;
 }
 
 /** Live audio counters for one call, so the UI can show that media is really flowing. */
@@ -56,6 +62,19 @@ export interface CallView {
   readonly progress?: string;
   /** i18n key explaining why the call ended, when the user should be told. */
   readonly endReasonKey?: string;
+}
+
+/**
+ * A REGISTER 200 OK lists every contact bound to the address of record, so it
+ * tells us whether another device is logged in as this account — and whether
+ * our own binding survived. A registration that was silently replaced stops
+ * receiving calls without reporting any error, which is worth saying out loud.
+ */
+export interface AccountSharing {
+  /** Bindings for this account that are not ours. */
+  readonly others: number;
+  /** True when our own contact is absent from the server's binding list. */
+  readonly displaced: boolean;
 }
 
 export interface AppSnapshot {
@@ -119,6 +138,8 @@ export interface OpenSipApi {
   clearLogs(): Promise<void>;
   /** Opens the OS microphone privacy pane. Takes no argument: the target is fixed in the main process. */
   openSystemSettings(): Promise<void>;
+  /** The OS's microphone grant. Takes no argument: ground truth the renderer cannot see itself. */
+  micPermission(): Promise<MicAccess>;
   onSnapshot(cb: (snapshot: AppSnapshot) => void): Unsubscribe;
   onUpdateStatus(cb: (status: UpdateStatus) => void): Unsubscribe;
 }

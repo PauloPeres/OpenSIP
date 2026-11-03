@@ -3,10 +3,13 @@ import type { CallView } from '../../../shared/api';
 /** The engine may add these fields to CallView; until it does, the UI derives them from the state. */
 export type ProgressedView = CallView & { readonly progress?: string; readonly endReasonKey?: string };
 
-const STAGES: readonly string[] = ['trying', 'ringing', 'connecting', 'active', 'ended'];
+const SETUP_TIMEOUT = 'calls.endReason.setupTimeout'; // i18n-exempt: translation key
+const STAGES: readonly string[] = ['trying', 'waiting', 'ringing', 'connecting', 'active', 'ended'];
+const PENDING: readonly string[] = ['trying', 'waiting', 'ringing', 'connecting'];
 const END_REASONS: readonly string[] = [
   'calls.endReason.busy', // i18n-exempt: translation key
   'calls.endReason.declined', // i18n-exempt: translation key
+  SETUP_TIMEOUT,
   'calls.endReason.unanswered', // i18n-exempt: translation key
   'calls.endReason.unreachable' // i18n-exempt: translation key
 ];
@@ -34,6 +37,16 @@ export function progressKey(view: ProgressedView): string | null {
   return stage === null ? null : `${PROGRESS_PREFIX}${stage}`;
 }
 
+/** True while the server has answered with a provisional response and then gone quiet. */
+export function isWaiting(view: ProgressedView): boolean {
+  return stageOf(view) === 'waiting';
+}
+
+/** The call was abandoned because the server never produced a final answer. */
+export function isSetupTimeout(view: ProgressedView): boolean {
+  return view.endReasonKey === SETUP_TIMEOUT;
+}
+
 export function endReasonKey(view: ProgressedView): string | null {
   const key = view.endReasonKey;
   return key !== undefined && END_REASONS.includes(key) ? key : null;
@@ -42,5 +55,5 @@ export function endReasonKey(view: ProgressedView): string | null {
 /** True while the call is still being set up, so the status can animate. */
 export function isPending(view: ProgressedView): boolean {
   const stage = stageOf(view);
-  return stage === 'trying' || stage === 'ringing' || stage === 'connecting';
+  return stage !== null && PENDING.includes(stage);
 }

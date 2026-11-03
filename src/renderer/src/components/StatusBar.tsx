@@ -1,21 +1,24 @@
 import type { AccountView } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { CallView } from '../../../shared/api';
-import { endReasonKey } from '../state/callProgress';
+import { endReasonKey, isSetupTimeout } from '../state/callProgress';
 import { RegistrationNote } from './RegistrationNote';
+import { isDisplaced } from '../state/accountState';
+import { DisplacedNote } from './SharingNote';
 import { Breakable } from './ui/Breakable';
+import { cx } from './ui/cx';
 
 function isNoteworthy(view: AccountView): boolean {
-  return view.registration.state === 'registering' || view.registration.state === 'failed';
+  return view.registration.state === 'registering' || view.registration.state === 'failed' || isDisplaced(view);
 }
 
 function RegistrationRows({ accounts }: { readonly accounts: readonly AccountView[] }): JSX.Element {
   return (
     <>
       {accounts.filter(isNoteworthy).map((view) => (
-        <p key={view.account.id} className="statusbar-row" role={view.registration.state === 'failed' ? 'alert' : 'status'}>
+        <p key={view.account.id} className="statusbar-row" role={view.registration.state === 'registering' ? 'status' : 'alert'}>
           <strong>{view.account.displayName}</strong>
-          <RegistrationNote registration={view.registration} />
+          {isDisplaced(view) ? <DisplacedNote withHint /> : <RegistrationNote registration={view.registration} />}
         </p>
       ))}
     </>
@@ -34,9 +37,9 @@ function EndedRows({ calls }: { readonly calls: readonly CallView[] }): JSX.Elem
   return (
     <>
       {calls.map((view) => (
-        <p key={view.call.id} className="statusbar-row" role="status">
+        <p key={view.call.id} className="statusbar-row" role={isSetupTimeout(view) ? 'alert' : 'status'}>
           <strong><Breakable text={view.call.remoteIdentity} titled /></strong>
-          <span className="progress">{t(endReasonKey(view) ?? ENDED)}</span>
+          <span className={cx('progress', isSetupTimeout(view) && 'progress-bad')}>{t(endReasonKey(view) ?? ENDED)}</span>
         </p>
       ))}
     </>

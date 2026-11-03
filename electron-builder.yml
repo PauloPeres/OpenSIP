@@ -1,5 +1,5 @@
 appId: com.opensip.app
-productName: OpenSIP
+productName: Open SIP Phone
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 npmRebuild: false
 directories:
@@ -14,6 +14,8 @@ publish:
 mac:
   icon: build/icon.icns
   category: public.app-category.utilities
+  # Ad-hoc signs when no Developer ID cert exists; see build/adhoc-sign.cjs and docs/packaging.md
+  sign: build/adhoc-sign.cjs
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist

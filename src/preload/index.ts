@@ -36,6 +36,7 @@ const api: OpenSipApi = {
   setDebugLogging: (enabled) => ipcRenderer.invoke(IPC.setDebugLogging, enabled),
   clearLogs: () => ipcRenderer.invoke(IPC.clearLogs),
   openSystemSettings: () => ipcRenderer.invoke(IPC.openSystemSettings),
+  micPermission: () => ipcRenderer.invoke(IPC.micPermission),
   onSnapshot: (cb) => subscribe(IPC.subscribe, cb),
   onUpdateStatus: (cb) => subscribe(IPC.updateStatus, cb)
 };

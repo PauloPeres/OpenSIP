@@ -5,7 +5,7 @@ import type { SipMessage, SipRequest, SipResponse } from '../../src/core/sip';
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
 import type { SipConnection } from '../../src/main/sip/connection';
-import { ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
+import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
 import { createMediaBridge } from '../../src/main/media/media-window';
 import type { MediaBridgeDeps, MediaWindowHandle } from '../../src/main/media/media-window';
 import { MEDIA_FRAME_SAMPLES, MEDIA_IPC, toPcmFrame } from '../../src/shared/media';
@@ -749,6 +749,441 @@ describe('engine outbound call', () => {
     for (let i = 0; i < 4; i += 1) await h.engine.dial('acc1', `10${i}`);
     expect(await h.engine.dial('acc1', '999')).toEqual({ ok: false, errorKey: 'calls.error.limitReached' });
     await h.engine.stop();
+  });
+});
+
+/* ------------------------------------------------------------------------
+ * RFC 3261 17.1.1 cancels timer B at the first provisional response, so a UAC
+ * that has seen a 100 would wait forever. The engine adds its own guard.
+ * ---------------------------------------------------------------------- */
+
+describe('engine call-setup guard', () => {
+  const SECOND = 1000;
+  const WAITING = 'calls.progress.waiting';
+  const TRYING = 'calls.progress.trying';
+  const SILENT = 'calls.endReason.setupTimeout';
+
+  const fakeClockHarness = async (): Promise<Harness> => {
+    const h = harness();
+    await registered(h);
+    vi.useFakeTimers();
+    return h;
+  };
+  const invite = (h: Harness, index = 0): SipRequest => h.pbx.requests('INVITE')[index] as SipRequest;
+  const view = (h: Harness): ReturnType<SipEngine['getCallViews']>[number] | undefined => h.engine.getCallViews()[0];
+  const advance = async (ms: number): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(ms);
+  };
+
+  it('exports a 90 second setup limit', () => {
+    expect(CALL_SETUP_TIMEOUT_MS).toBe(90_000);
+  });
+
+  it('keeps a call that only ever got a 100 alive at 89 999 ms and cancels it at exactly 90 000 ms', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS - 1);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+      expect(view(h)?.call.state).toBe('connecting');
+      await advance(1);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(1);
+      expect(view(h)?.call.state).toBe('ended');
+      expect(view(h)?.endReasonKey).toBe(SILENT);
+      expect(view(h)?.progress).toBe('calls.progress.ended');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends a CANCEL that matches the INVITE it cancels (RFC 3261 9.1)', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS);
+      const cancel = h.pbx.requests('CANCEL')[0] as SipRequest;
+      const original = invite(h);
+      const branchOf = (r: SipRequest): string | undefined => /branch=([^;,\s]+)/.exec(headerValue(r.headers, 'via') ?? '')?.[1];
+      expect(branchOf(cancel)).toBeDefined();
+      expect(branchOf(cancel)).toBe(branchOf(original));
+      expect(headerValue(cancel.headers, 'call-id')).toBe(headerValue(original.headers, 'call-id'));
+      expect(headerValue(cancel.headers, 'from')).toBe(headerValue(original.headers, 'from'));
+      expect(headerValue(cancel.headers, 'to')).toBe(headerValue(original.headers, 'to'));
+      expect(headerValue(cancel.headers, 'to')).not.toContain('tag=');
+      expect(headerValue(cancel.headers, 'cseq')).toBe('1 CANCEL');
+      expect(cancel.uri).toBe(original.uri);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not extended by a stream of further 100 responses', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      for (let i = 0; i < 8; i += 1) {
+        await advance(10 * SECOND);
+        h.pbx.inject(reply(invite(h), 100));
+      }
+      await advance(9 * SECOND);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+      await advance(SECOND);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('also releases the user from a far end that rings for 90 seconds and never answers', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS - 1);
+      expect(view(h)?.progress).toBe('calls.progress.ringing');
+      expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+      h.pbx.inject(reply(invite(h), 183));
+      await advance(1);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(1);
+      expect(view(h)?.endReasonKey).toBe(SILENT);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs the timeout at warn level', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS);
+      const entry = h.diagnostics.entries().find((e) => e.messageKey === SILENT);
+      expect(entry?.level).toBe('warn');
+      expect(entry?.accountId).toBe('acc1');
+      expect(h.diagnostics.entries().filter((e) => e.messageKey === SILENT)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('acknowledges the 487 that answers our CANCEL without changing the outcome', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS);
+      h.pbx.inject(reply(invite(h), 487));
+      expect(h.pbx.requests('ACK')).toHaveLength(1);
+      expect(view(h)?.endReasonKey).toBe(SILENT);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts from the first INVITE: a digest retry does not restart the clock', async () => {
+    const h = await fakeClockHarness();
+    try {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(30 * SECOND);
+      h.pbx.inject(reply(invite(h), 401, { 'www-authenticate': ['Digest realm="pbx", nonce="abc", algorithm=MD5, qop="auth"'] }));
+      await advance(0);
+      expect(h.pbx.requests('INVITE')).toHaveLength(2);
+      await advance(60 * SECOND - 1);
+      expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+      await advance(1);
+      const cancel = h.pbx.requests('CANCEL')[0] as SipRequest;
+      expect(headerValue(cancel.headers, 'cseq')).toBe('2 CANCEL');
+      expect(headerValue(cancel.headers, 'via')).toBe(headerValue(invite(h, 1).headers, 'via'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe('waiting message', () => {
+    it('exports a grace period of 4 seconds', () => {
+      expect(CALL_WAITING_GRACE_MS).toBe(4000);
+    });
+
+    it('stays on trying until the grace period passes after the first 100, then shows waiting', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+        await h.engine.dial('acc1', '55500000396');
+        await advance(CALL_WAITING_GRACE_MS - 1);
+        expect(view(h)?.progress).toBe(TRYING);
+        await advance(1);
+        expect(view(h)?.progress).toBe(WAITING);
+        expect(h.diagnostics.entries().filter((e) => e.messageKey === WAITING)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is not undone by a repeated 100, and ringing replaces it', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : []);
+        await h.engine.dial('acc1', '55500000396');
+        await advance(CALL_WAITING_GRACE_MS);
+        h.pbx.inject(reply(invite(h), 100));
+        expect(view(h)?.progress).toBe(WAITING);
+        h.pbx.inject(reply(invite(h), 180));
+        expect(view(h)?.progress).toBe('calls.progress.ringing');
+        h.pbx.inject(reply(invite(h), 100));
+        expect(view(h)?.progress).toBe('calls.progress.ringing');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('leaves ringing alone when the grace period ends', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180)] : []);
+        await h.engine.dial('acc1', '55500000396');
+        await advance(CALL_WAITING_GRACE_MS + 1);
+        expect(view(h)?.progress).toBe('calls.progress.ringing');
+        expect(h.diagnostics.entries().some((e) => e.messageKey === WAITING)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never shows waiting for a call that was answered or refused inside the grace period', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 200, {}, ANSWER)] : []);
+        await h.engine.dial('acc1', '1001');
+        await advance(CALL_WAITING_GRACE_MS + 1);
+        expect(view(h)?.progress).toBe('calls.progress.active');
+        expect(h.diagnostics.entries().some((e) => e.messageKey === WAITING)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('timer hygiene', () => {
+    it('is cleared by a final response: a 486 is never followed by a CANCEL', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 486)] : []);
+        await h.engine.dial('acc1', '1002');
+        await advance(CALL_SETUP_TIMEOUT_MS + 1);
+        expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+        expect(h.diagnostics.entries().some((e) => e.messageKey === SILENT)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is cleared by a 200: an answered call is neither cancelled nor leaves a timer behind', async () => {
+      const h = await fakeClockHarness();
+      try {
+        const before = vi.getTimerCount();
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 200, {}, ANSWER)] : []);
+        await h.engine.dial('acc1', '1001');
+        await advance(0);
+        expect(vi.getTimerCount()).toBe(before);
+        await advance(CALL_SETUP_TIMEOUT_MS + 1);
+        expect(h.pbx.requests('CANCEL')).toHaveLength(0);
+        expect(view(h)?.call.state).toBe('active');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is cleared by a local hangup, leaving a single CANCEL', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180)] : []);
+        const result = await h.engine.dial('acc1', '1003');
+        await advance(SECOND);
+        await h.engine.hangup((result as { callId: string }).callId);
+        await advance(CALL_SETUP_TIMEOUT_MS + 1);
+        expect(h.pbx.requests('CANCEL')).toHaveLength(1);
+        expect(h.diagnostics.entries().some((e) => e.messageKey === SILENT)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is cleared by stop(): nothing fires afterwards', async () => {
+      const h = await fakeClockHarness();
+      try {
+        h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100)] : m.method === 'REGISTER' ? [reply(m, 200)] : []);
+        await h.engine.dial('acc1', '55500000396');
+        await advance(SECOND);
+        const stopping = h.engine.stop();
+        await advance(2 * SECOND);
+        await stopping;
+        const cancels = h.pbx.requests('CANCEL').length;
+        await advance(CALL_SETUP_TIMEOUT_MS + 1);
+        expect(h.pbx.requests('CANCEL')).toHaveLength(cancels);
+        expect(h.diagnostics.entries().some((e) => e.messageKey === SILENT)).toBe(false);
+        expect(h.diagnostics.entries().some((e) => e.messageKey === WAITING)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+});
+
+/* ------------------------------------------------------------------------
+ * Another device holding the same account: the 200 OK lists every binding.
+ * ---------------------------------------------------------------------- */
+
+describe('engine account sharing', () => {
+  const THEIRS = '<sip:1000@203.0.113.7:5070;transport=udp>;expires=300';
+  const SHARED = 'logs.event.shared';
+  const DISPLACED = 'logs.event.displaced';
+
+  /** A registrar that echoes the Contact it was sent (unless `ours` is false) next to the given others. */
+  const answering = (h: Harness, others: () => string[], ours: () => boolean = () => true): void => {
+    h.pbx.respond = (m) => {
+      if (m.method !== 'REGISTER') return [];
+      const ourContact = `${headerValue(m.headers, 'contact') ?? ''};expires=300`;
+      return [reply(m, 200, { expires: ['300'], contact: [...(ours() ? [ourContact] : []), ...others()] })];
+    };
+  };
+  const start = async (h: Harness): Promise<void> => {
+    const account = createAccount({ displayName: 'Me', username: '1000', password: 'secret', domain: 'pbx.test' }, 'acc1');
+    await h.engine.startAccount(account);
+    await vi.advanceTimersByTimeAsync(20);
+  };
+  const warned = (h: Harness, key: string): readonly unknown[] =>
+    h.diagnostics.entries().filter((e) => e.messageKey === key && e.level === 'warn');
+
+  it('reports nothing shared when only our contact is bound', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      answering(h, () => []);
+      await start(h);
+      expect(h.engine.getSharing()).toEqual({ acc1: { others: 0, displaced: false } });
+      expect(warned(h, SHARED)).toHaveLength(0);
+      expect(warned(h, DISPLACED)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports another device and logs it once at warn level', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      answering(h, () => [THEIRS]);
+      await start(h);
+      expect(h.engine.getSharing()).toEqual({ acc1: { others: 1, displaced: false } });
+      const [entry] = h.diagnostics.entries().filter((e) => e.messageKey === SHARED);
+      expect(entry?.level).toBe('warn');
+      expect(entry?.params).toEqual({ contacts: 'sip:1000@203.0.113.7:5070' });
+      expect(warned(h, DISPLACED)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not repeat the log on a refresh that changes nothing, but logs again when it changes', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      let others = [THEIRS];
+      answering(h, () => others);
+      await start(h);
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(h.pbx.requests('REGISTER').length).toBeGreaterThanOrEqual(2);
+      expect(warned(h, SHARED)).toHaveLength(1);
+      others = [THEIRS, '<sip:1000@198.51.100.2:6000>;expires=60'];
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(warned(h, SHARED)).toHaveLength(2);
+      expect(h.engine.getSharing()['acc1']).toEqual({ others: 2, displaced: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports displacement, logging it once, when ours is missing from the list', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      answering(h, () => [THEIRS], () => false);
+      await start(h);
+      expect(h.engine.getSharing()).toEqual({ acc1: { others: 1, displaced: true } });
+      expect(warned(h, DISPLACED)).toHaveLength(1);
+      expect(warned(h, SHARED)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(warned(h, DISPLACED)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs the displacement again after it was resolved and then recurs', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      let ours = false;
+      answering(h, () => [THEIRS], () => ours);
+      await start(h);
+      ours = true;
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(h.engine.getSharing()['acc1']).toEqual({ others: 1, displaced: false });
+      ours = false;
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(warned(h, DISPLACED)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says nothing, and does not claim displacement, when the 200 omits Contact', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      h.pbx.respond = (m) => (m.method === 'REGISTER' ? [reply(m, 200, { expires: ['300'], contact: [] })] : []);
+      await start(h);
+      expect(h.engine.getSharing()).toEqual({ acc1: { others: 0, displaced: false } });
+      expect(warned(h, DISPLACED)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('forgets what it knew when the account stops', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      answering(h, () => [THEIRS]);
+      await start(h);
+      const stopping = h.engine.stopAccount('acc1');
+      await vi.advanceTimersByTimeAsync(2000);
+      await stopping;
+      expect(h.engine.getSharing()).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('forgets it when the registration fails, so a stale warning is not shown', async () => {
+    const h = harness();
+    vi.useFakeTimers();
+    try {
+      let refuse = false;
+      h.pbx.respond = (m) => (m.method === 'REGISTER' ? [refuse ? reply(m, 403) : reply(m, 200, { expires: ['300'], contact: [THEIRS] })] : []);
+      await start(h);
+      expect(h.engine.getSharing()['acc1']?.others).toBe(1);
+      refuse = true;
+      await vi.advanceTimersByTimeAsync(300 * 1000);
+      expect(h.engine.getSharing()).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

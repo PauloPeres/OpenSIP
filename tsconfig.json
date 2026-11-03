@@ -24,5 +24,6 @@
       "@core/*": ["src/core/*"]
     }
   },
-  "include": ["src", "tests", "scripts", "*.config.ts"]
+  "include": ["src", "tests", "scripts", "*.config.ts"],
+  "exclude": ["tests/unit/live-*.spec.ts"]
 }

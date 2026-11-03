@@ -1,4 +1,4 @@
-# Contributing to OpenSIP · Como contribuir
+# Contributing to Open SIP Phone · Como contribuir
 
 ## English
 
