@@ -128,6 +128,8 @@ which is why the whole protocol can be tested exhaustively without a PBX.
 Answering a call currently completes the SIP signalling only. The RTP media path is
 the next milestone and is tracked openly rather than implied.
 
+What comes after that, in order, is in the [roadmap](ROADMAP.md).
+
 ## Quality gates
 
 Every gate runs in CI on each push and pull request. Run them all locally with:

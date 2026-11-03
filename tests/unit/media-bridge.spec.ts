@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createDiagnosticsLog } from '../../src/core/diagnostics';
 import { createAccount, headerValue } from '../../src/core/sip';
-import type { SipMessage, SipRequest, SipResponse } from '../../src/core/sip';
+import type { SipMessage, SipRequest, SipResponse, TransportCandidate } from '../../src/core/sip';
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
+import { openConnection } from '../../src/main/sip/connection';
 import type { SipConnection } from '../../src/main/sip/connection';
 import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
 import { createMediaBridge } from '../../src/main/media/media-window';
@@ -18,6 +19,45 @@ import {
 } from '../../src/renderer/src/media/audio';
 
 vi.mock('../../src/main/windows', () => ({ log: (): void => undefined }));
+
+const udp = vi.hoisted(() => ({ sockets: [] as unknown[] }));
+
+/** A dgram socket fake that, like the kernel, drops foreign sources once `connect` has been called. */
+vi.mock('node:dgram', async () => {
+  const { EventEmitter: Emitter } = await import('node:events');
+  class FakeDgram extends Emitter {
+    connected = false;
+    bound = false;
+    sent: { text: string; port: number | undefined; host: string | undefined }[] = [];
+    connect(_port: number, _host: string, done: () => void): void {
+      this.connected = true;
+      queueMicrotask(done);
+    }
+    bind(_port: number, done?: () => void): void {
+      this.bound = true;
+      if (done !== undefined) queueMicrotask(done);
+      queueMicrotask(() => this.emit('listening'));
+    }
+    address(): { address: string; port: number; family: string } {
+      return { address: '0.0.0.0', port: 40123, family: 'IPv4' };
+    }
+    send(text: string, ...rest: unknown[]): void {
+      const done = rest.find((item) => typeof item === 'function') as ((error?: Error) => void) | undefined;
+      const [port, host] = rest.filter((item) => typeof item !== 'function') as [number?, string?];
+      this.sent.push({ text, port, host });
+      done?.();
+    }
+    receive(data: string, from: { address: string; port: number }, server: { host: string; port: number }): void {
+      const matches = from.address === server.host && from.port === server.port;
+      if (this.connected && !matches) return;
+      this.emit('message', Buffer.from(data), from);
+    }
+    close(): void {
+      this.emit('close');
+    }
+  }
+  return { createSocket: (): FakeDgram => { const socket = new FakeDgram(); udp.sockets.push(socket); return socket; } };
+});
 
 type Handler = (sender: unknown, ...args: unknown[]) => void;
 
@@ -1239,5 +1279,33 @@ describe('engine inbound call', () => {
     await settle();
     expect(h.pbx.sent.some((m) => m.kind === 'response' && m.status === 488)).toBe(true);
     expect(h.engine.getCallViews()).toHaveLength(0);
+  });
+});
+
+
+describe('UDP connection', () => {
+  const candidate = { transport: 'udp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
+  const ringing = 'SIP/2.0 180 Ringing\r\nCall-ID: abc\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n';
+  type Fake = {
+    sent: { text: string; port: number | undefined; host: string | undefined }[];
+    receive: (data: string, from: { address: string; port: number }, server: { host: string; port: number }) => void;
+  };
+
+  it('surfaces a response sent from a different source than the request destination', async () => {
+    const connection = await openConnection(candidate);
+    const seen: SipMessage[] = [];
+    connection.onMessage((message) => seen.push(message));
+    const socket = udp.sockets.at(-1) as Fake;
+    socket.receive(ringing, { address: '198.51.100.9', port: 5088 }, candidate);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ kind: 'response', status: 180 });
+  });
+
+  it('reports the bound local port and sends to an explicit destination', async () => {
+    const connection = await openConnection(candidate);
+    const socket = udp.sockets.at(-1) as Fake;
+    expect(connection.localAddress).toEqual({ host: '0.0.0.0', port: 40123 });
+    await connection.send({ kind: 'response', status: 200, reason: 'OK', headers: {}, body: '' } as unknown as SipMessage);
+    expect(socket.sent[0]).toMatchObject({ port: 5060, host: '203.0.113.5' });
   });
 });

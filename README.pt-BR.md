@@ -134,6 +134,8 @@ do núcleo — e é por isso que o protocolo inteiro pode ser testado sem nenhum
 Atender uma chamada hoje conclui apenas a sinalização SIP. O caminho de mídia RTP é o
 próximo marco, e está declarado abertamente em vez de insinuado.
 
+O que vem depois, em ordem, está no [plano de evolução](ROADMAP.md#português).
+
 ## Portões de qualidade
 
 Todos rodam na CI em cada push e pull request. Para rodar todos localmente:

@@ -1,9 +1,11 @@
 import { createSocket } from 'node:dgram';
+import type { RemoteInfo, Socket as DgramSocket } from 'node:dgram';
 import { connect as netConnect } from 'node:net';
 import type { Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 import { extractMessages, parse, serialize } from '@core/sip';
 import type { SipMessage, SipTransport, TransportCandidate } from '@core/sip';
+import { log } from '../windows';
 
 export interface SipConnection {
   send(message: SipMessage): Promise<void>;
@@ -148,16 +150,46 @@ function parseDatagram(data: Buffer, hub: Hub): void {
   }
 }
 
+/** Notes, once per distinct source, a datagram that did not come from the server we sent to. */
+function noteForeignSource(candidate: TransportCandidate, seen: Set<string>): (info: RemoteInfo) => void {
+  return (info) => {
+    const source = `${info.address}:${info.port}`;
+    if (source === `${candidate.host}:${candidate.port}` || seen.has(source)) return;
+    seen.add(source);
+    log('info', `udp datagram from ${source}, not the server ${candidate.host}:${candidate.port}`);
+  };
+}
+
+function bindDatagram(socket: DgramSocket): Promise<void> {
+  return new Promise((resolve) => {
+    socket.once('listening', resolve);
+    socket.bind(0);
+  });
+}
+
+/**
+ * The socket is deliberately NOT connect()ed. A connected UDP socket makes the kernel drop every datagram
+ * whose source differs from the connected peer, but a SIP proxy routinely answers from another port,
+ * listener or interface (and a relayed call from another element entirely), so the 180/200 that follow a
+ * 100 Trying would vanish. RFC 3261 matches responses by Via branch / Call-ID / CSeq, never by source,
+ * so we bind, send with an explicit destination and accept datagrams from anywhere.
+ */
 async function openDatagram(candidate: TransportCandidate): Promise<SipConnection> {
   const socket = createSocket('udp4');
   const hub = createHub();
-  socket.on('message', (data) => parseDatagram(data, hub));
+  const noteSource = noteForeignSource(candidate, new Set());
+  socket.on('message', (data, info) => {
+    noteSource(info);
+    parseDatagram(data, hub);
+  });
   socket.on('error', (error) => hub.end(reasonOf(error)));
   socket.on('close', () => hub.end('closed'));
-  await new Promise<void>((resolve) => socket.connect(candidate.port, candidate.host, resolve));
+  await bindDatagram(socket);
   const { address, port } = socket.address();
   const write = (text: string): Promise<void> =>
-    new Promise((resolve, reject) => socket.send(text, (error) => (error ? reject(error) : resolve())));
+    new Promise((resolve, reject) =>
+      socket.send(text, candidate.port, candidate.host, (error) => (error ? reject(error) : resolve()))
+    );
   return assemble(candidate, { host: address, port }, hub, { write, destroy: () => socket.close() });
 }
 
