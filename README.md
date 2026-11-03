@@ -25,21 +25,25 @@ Linux, from a single codebase, with automatic updates.
   supports it.
 - **Quality enforced by machine, not by opinion** — see [Quality gates](#quality-gates).
 
-## Transport: read this before you report a bug
+## Transport: you give it a domain, it works out the rest
 
-OpenSIP talks **SIP over WebSocket** (`ws://` / `wss://`), the transport browsers and
-Electron can actually open. It does **not** speak SIP over plain UDP or TCP.
+You are not asked for a port, a protocol or a WebSocket URL. Give OpenSIP a username,
+a password and a domain, and it finds the way in:
 
-Your PBX or provider must expose a WebSocket SIP endpoint. Most modern ones do:
+1. It queries the SRV records defined by RFC 3263 and RFC 7118 — `_sips._tcp`,
+   `_sips._wss`, `_sip._tcp`, `_sip._ws`, `_sip._udp`.
+2. If the domain publishes none, it falls back to the default port ladder
+   (TLS 5061, TCP 5060, UDP 5060, WSS 443, WS 80).
+3. It probes the candidates in order of preference — **TLS, WSS, TCP, WS, UDP**,
+   encrypted first, then reliable — and keeps the first that answers, respecting SRV
+   priority and weight.
 
-| Platform | Typical WebSocket endpoint |
-| --- | --- |
-| Asterisk (`res_http_websocket`) | `wss://pbx.example.com:8089/ws` |
-| FreeSWITCH (`mod_sofia` WSS profile) | `wss://pbx.example.com:7443` |
-| Kamailio / OpenSIPS (`websocket` module) | `wss://sip.example.com:443` |
+**Supported transports: TLS, TCP, UDP, WSS and WS.** SIP over TCP and UDP is spoken by
+a native stack in the Electron main process, so a plain Asterisk, FreeSWITCH, Kamailio
+or OpenSIPS endpoint works without any WebSocket module.
 
-If your provider is UDP-only, put a WebSocket-capable proxy (Kamailio, OpenSIPS or
-Asterisk) in front of it.
+If you need to pin one specific path, set the optional server field under **Advanced**
+(or `OPENSIP_ACCOUNT_<N>_SERVER_URI`) to something like `tcp://pbx.example.com:5060`.
 
 ## Install
 
@@ -74,13 +78,14 @@ OPENSIP_ACCOUNT_1_DISPLAY_NAME=Support
 OPENSIP_ACCOUNT_1_USERNAME=1001
 OPENSIP_ACCOUNT_1_PASSWORD=secret
 OPENSIP_ACCOUNT_1_DOMAIN=pbx.example.com
-OPENSIP_ACCOUNT_1_WS_SERVER=wss://pbx.example.com:8089/ws
+OPENSIP_ACCOUNT_1_SERVER_URI=tcp://pbx.example.com:5060
 OPENSIP_ACCOUNT_1_REGISTER_EXPIRES=600
 ```
 
 Up to nine accounts (`OPENSIP_ACCOUNT_1_*` … `OPENSIP_ACCOUNT_9_*`) are read. An entry
-is only seeded when `USERNAME`, `PASSWORD`, `DOMAIN` and `WS_SERVER` are all filled in,
-so gaps and half-filled blocks are simply skipped. Seeding happens **only in
+is only seeded when `USERNAME`, `PASSWORD` and `DOMAIN` are filled in, so gaps and
+half-filled blocks are simply skipped. `SERVER_URI` is optional — leave it empty for
+automatic discovery; the legacy `WS_SERVER` name is still accepted. Seeding happens **only in
 development** (`!app.isPackaged`) and **only when no account is stored yet**; packaged
 builds ignore the file entirely.
 
@@ -95,18 +100,33 @@ npm run dist
 ```
 src/core/      pure, framework-free domain — no Electron, no DOM, 100% unit tested
   i18n/        translator + en/pt-BR dictionaries
-  sip/         account validation, account store, registration and call state machines
+  sip/         account validation, account store, registration and call state
+               machines, transport discovery, SIP wire codec and digest auth
   config/      development account seeding from the environment
-src/main/      Electron main process: windows, IPC, storage, auto-update, sip.js adapter
+src/main/      Electron main process: windows, IPC, storage, auto-update
+  sip/         native SIP stack: transport prober, sockets, REGISTER transactions
 src/preload/   contextBridge surface — the only path between renderer and main
 src/renderer/  React UI; every string goes through t()
 src/shared/    the IPC contract shared by all three processes
 ```
 
-The rule that keeps this testable: **all state transitions live in `src/core` as pure
-functions.** `src/main/sip-engine.ts` is a thin adapter that translates sip.js events
-into core events and nothing more, which is why the domain can be exhaustively tested
-without a PBX.
+The rule that keeps this testable: **every decision lives in `src/core` as a pure
+function** — state transitions, transport ordering, message framing, digest responses.
+`src/main/sip` only owns sockets and DNS, and feeds events into the core reducers,
+which is why the whole protocol can be tested exhaustively without a PBX.
+
+### Status
+
+| Capability | State |
+| --- | --- |
+| Multiple accounts, validation, persistence | working |
+| Automatic transport discovery (SRV + probe) | working |
+| Registration over TCP, TLS, UDP, WS, WSS | working |
+| Incoming call signalling: ring, answer, reject, hang up | working |
+| **Two-way audio (RTP/G.711)** | **not yet — next milestone** |
+
+Answering a call currently completes the SIP signalling only. The RTP media path is
+the next milestone and is tracked openly rather than implied.
 
 ## Quality gates
 

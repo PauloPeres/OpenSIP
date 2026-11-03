@@ -18,7 +18,6 @@ const input = (over: Partial<SipAccountInput> = {}): SipAccountInput => ({
   username: 'alice',
   password: 'pw',
   domain: 'sip.example.com',
-  wsServer: 'wss://sip.example.com:7443',
   ...over
 });
 const make = (id: string, over: Partial<SipAccountInput> = {}): ReturnType<typeof createAccount> =>
@@ -104,6 +103,17 @@ describe('updateAccount', () => {
       displayName: 'Work'
     });
     expect(state['a']?.username).toBe('alice');
+  });
+
+  it('sets and then clears the serverUri override', () => {
+    const pinned = updateAccount(state, 'a', { serverUri: ' tcp://pbx:5060 ' });
+    expect(pinned['a']?.serverUri).toBe('tcp://pbx:5060');
+    const cleared = updateAccount(pinned, 'a', { serverUri: '' });
+    expect(cleared['a'] !== undefined && Object.hasOwn(cleared['a'], 'serverUri')).toBe(false);
+  });
+
+  it('rejects an unsupported serverUri in a patch', () => {
+    expect(() => updateAccount(state, 'a', { serverUri: 'ftp://pbx' })).toThrow(AccountValidationError);
   });
 
   it('throws AccountNotFoundError', () => {

@@ -53,9 +53,15 @@ const attempt = (action: () => void): void => {
   }
 };
 
-const addNamed = (name: string, user: string, domain: string): void => {
+const addNamed = (name: string, user: string, domain: string, serverUri?: string): void => {
   const account = createAccount(
-    { displayName: name, username: user, password: 'pw', domain, wsServer: `wss://${domain}:7443` },
+    {
+      displayName: name,
+      username: user,
+      password: 'pw',
+      domain,
+      ...(serverUri === undefined ? {} : { serverUri })
+    },
     name
   );
   world.accounts = addAccount(world.accounts, account);
@@ -87,7 +93,9 @@ Given('no SIP accounts are configured', () => {
   assert.equal(listAccounts(world.accounts).length, 0);
 });
 
-Given('the account {string} for {string} on {string} is configured', addNamed);
+Given('the account {string} for {string} on {string} is configured', (name: string, user: string, domain: string) => {
+  addNamed(name, user, domain);
+});
 
 Given('the account {string} for {string} on {string} is registered', (name: string, user: string, domain: string) => {
   addNamed(name, user, domain);
@@ -97,6 +105,24 @@ Given('the account {string} for {string} on {string} is registered', (name: stri
 
 When('I add the account {string} for {string} on {string}', (name: string, user: string, domain: string) => {
   attempt(() => addNamed(name, user, domain));
+});
+
+When(
+  'I add the account {string} for {string} on {string} pinned to the server {string}',
+  (name: string, user: string, domain: string, serverUri: string) => {
+    attempt(() => addNamed(name, user, domain, serverUri));
+  }
+);
+
+Then('the account {string} is pinned to the server {string}', (name: string, serverUri: string) => {
+  const account = listAccounts(world.accounts).find((a) => a.id === name);
+  assert.equal(account?.serverUri, serverUri);
+});
+
+Then('the account {string} discovers its transport automatically', (name: string) => {
+  const account = listAccounts(world.accounts).find((a) => a.id === name);
+  assert.ok(account !== undefined);
+  assert.equal(Object.hasOwn(account, 'serverUri'), false);
 });
 
 When('I register every account', registerAll);

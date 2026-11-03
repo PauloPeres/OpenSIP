@@ -5,7 +5,8 @@ export interface SipAccountInput {
   readonly username: string;
   readonly password: string;
   readonly domain: string;
-  readonly wsServer: string;
+  /** Optional manual override (e.g. tcp://pbx:5060); absent means discover the transport. */
+  readonly serverUri?: string;
   readonly registerExpires?: number;
 }
 

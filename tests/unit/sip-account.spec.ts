@@ -11,8 +11,7 @@ const valid: SipAccountInput = {
   displayName: 'Work',
   username: 'alice',
   password: 's3cret',
-  domain: 'sip.example.com',
-  wsServer: 'wss://sip.example.com:7443'
+  domain: 'sip.example.com'
 };
 
 const keys = (input: SipAccountInput): string[] =>
@@ -53,16 +52,40 @@ describe('validateAccountInput', () => {
     }
   );
 
-  it.each(['', 'http://x.com', 'sip.example.com', 'wss://', 'ws://a b'])(
-    'rejects wsServer "%s"',
-    (wsServer) => {
-      expect(keys({ ...valid, wsServer })).toEqual(['wsServer:accounts.validation.wsServerInvalid']);
+  it('accepts an account with only username, password and domain', () => {
+    expect(
+      validateAccountInput({
+        displayName: 'Work',
+        username: 'alice',
+        password: 's3cret',
+        domain: 'sip.example.com'
+      })
+    ).toEqual([]);
+  });
+
+  it.each([undefined, '', '   '])('treats serverUri %j as "discover the transport"', (serverUri) => {
+    const input = serverUri === undefined ? valid : { ...valid, serverUri };
+    expect(keys(input)).toEqual([]);
+  });
+
+  it.each([
+    'tcp://pbx:5060',
+    'wss://pbx:8089/ws',
+    'ws://host:80',
+    'wss://host',
+    'tls://host:5061',
+    'udp://host',
+    ' tcp://host '
+  ])('accepts serverUri "%s"', (serverUri) => {
+    expect(keys({ ...valid, serverUri })).toEqual([]);
+  });
+
+  it.each(['ftp://pbx:21', 'http://x.com', 'wss://', 'tcp://'])(
+    'rejects serverUri "%s"',
+    (serverUri) => {
+      expect(keys({ ...valid, serverUri })).toEqual(['serverUri:accounts.validation.serverUriInvalid']);
     }
   );
-
-  it.each(['ws://host:80', 'wss://host', ' wss://host '])('accepts wsServer "%s"', (wsServer) => {
-    expect(keys({ ...valid, wsServer })).toEqual([]);
-  });
 
   it.each([60, 61, 600, 3599, 3600])('accepts registerExpires %d', (registerExpires) => {
     expect(keys({ ...valid, registerExpires })).toEqual([]);
@@ -79,9 +102,9 @@ describe('validateAccountInput', () => {
       ...valid,
       displayName: '',
       username: '',
-      wsServer: 'x'
+      serverUri: 'ftp://x'
     }).map((i) => i.field);
-    expect(fields).toEqual(['displayName', 'username', 'wsServer']);
+    expect(fields).toEqual(['displayName', 'username', 'serverUri']);
   });
 });
 
@@ -95,6 +118,21 @@ describe('createAccount', () => {
     });
   });
 
+  it.each([undefined, '', '   '])('omits the serverUri property when it is %j', (serverUri) => {
+    const input = serverUri === undefined ? valid : { ...valid, serverUri };
+    const account = createAccount(input, 'x');
+    expect(Object.hasOwn(account, 'serverUri')).toBe(false);
+    expect(Object.keys(account).sort()).toEqual(
+      ['displayName', 'domain', 'id', 'password', 'registerExpires', 'uri', 'username']
+    );
+  });
+
+  it('rejects an unsupported serverUri without leaking the transport error', () => {
+    expect(() => createAccount({ ...valid, serverUri: 'ftp://pbx' }, 'x')).toThrow(
+      AccountValidationError
+    );
+  });
+
   it('keeps an explicit expiry', () => {
     expect(createAccount({ ...valid, registerExpires: 60 }, 'x').registerExpires).toBe(60);
   });
@@ -106,7 +144,7 @@ describe('createAccount', () => {
         username: ' alice ',
         password: ' pw ',
         domain: ' sip.example.com ',
-        wsServer: ' wss://h '
+        serverUri: ' wss://h '
       },
       'x'
     );
@@ -115,7 +153,7 @@ describe('createAccount', () => {
       username: 'alice',
       password: ' pw ',
       domain: 'sip.example.com',
-      wsServer: 'wss://h',
+      serverUri: 'wss://h',
       uri: 'sip:alice@sip.example.com'
     });
   });

@@ -28,23 +28,26 @@ automática.
 - **Qualidade verificada por máquina, não por opinião** — veja
   [Portões de qualidade](#portões-de-qualidade).
 
-## Transporte: leia antes de abrir um bug
+## Transporte: você dá o domínio, ele descobre o resto
 
-O OpenSIP fala **SIP sobre WebSocket** (`ws://` / `wss://`), o transporte que
-navegadores e o Electron conseguem abrir de fato. Ele **não** fala SIP sobre UDP ou
-TCP puros.
+Não se pede porta, protocolo nem URL de WebSocket. Informe usuário, senha e domínio, e
+o OpenSIP acha o caminho:
 
-Seu PBX ou provedor precisa expor um endpoint SIP em WebSocket. Praticamente todos os
-modernos expõem:
+1. Consulta os registros SRV definidos pelas RFC 3263 e RFC 7118 — `_sips._tcp`,
+   `_sips._wss`, `_sip._tcp`, `_sip._ws`, `_sip._udp`.
+2. Se o domínio não publica nenhum, cai para a escada de portas padrão
+   (TLS 5061, TCP 5060, UDP 5060, WSS 443, WS 80).
+3. Sonda os candidatos por ordem de preferência — **TLS, WSS, TCP, WS, UDP**,
+   criptografado primeiro, depois confiável — e fica com o primeiro que responder,
+   respeitando prioridade e peso do SRV.
 
-| Plataforma | Endpoint WebSocket típico |
-| --- | --- |
-| Asterisk (`res_http_websocket`) | `wss://pbx.exemplo.com:8089/ws` |
-| FreeSWITCH (perfil WSS do `mod_sofia`) | `wss://pbx.exemplo.com:7443` |
-| Kamailio / OpenSIPS (módulo `websocket`) | `wss://sip.exemplo.com:443` |
+**Transportes suportados: TLS, TCP, UDP, WSS e WS.** SIP sobre TCP e UDP é falado por
+uma pilha nativa no processo principal do Electron, então um Asterisk, FreeSWITCH,
+Kamailio ou OpenSIPS comum funciona sem nenhum módulo de WebSocket.
 
-Se o seu provedor é só UDP, coloque na frente dele um proxy com suporte a WebSocket
-(Kamailio, OpenSIPS ou Asterisk).
+Se precisar fixar um caminho específico, preencha o campo opcional de servidor em
+**Avançado** (ou `OPENSIP_ACCOUNT_<N>_SERVER_URI`) com algo como
+`tcp://pbx.exemplo.com:5060`.
 
 ## Instalação
 
@@ -79,13 +82,14 @@ OPENSIP_ACCOUNT_1_DISPLAY_NAME=Suporte
 OPENSIP_ACCOUNT_1_USERNAME=1001
 OPENSIP_ACCOUNT_1_PASSWORD=segredo
 OPENSIP_ACCOUNT_1_DOMAIN=pbx.exemplo.com
-OPENSIP_ACCOUNT_1_WS_SERVER=wss://pbx.exemplo.com:8089/ws
+OPENSIP_ACCOUNT_1_SERVER_URI=tcp://pbx.exemplo.com:5060
 OPENSIP_ACCOUNT_1_REGISTER_EXPIRES=600
 ```
 
 São lidas até nove contas (`OPENSIP_ACCOUNT_1_*` … `OPENSIP_ACCOUNT_9_*`). Uma entrada
-só é carregada quando `USERNAME`, `PASSWORD`, `DOMAIN` e `WS_SERVER` estão todos
-preenchidos, então blocos vazios ou pela metade são simplesmente ignorados. A carga
+só é carregada quando `USERNAME`, `PASSWORD` e `DOMAIN` estão preenchidos, então
+blocos vazios ou pela metade são simplesmente ignorados. O `SERVER_URI` é opcional —
+deixe vazio para descoberta automática; o nome antigo `WS_SERVER` continua aceito. A carga
 acontece **somente em desenvolvimento** (`!app.isPackaged`) e **somente quando nenhuma
 conta foi salva ainda**; builds empacotados ignoram o arquivo por completo.
 
@@ -101,19 +105,34 @@ npm run dist
 src/core/      domínio puro, sem framework — sem Electron, sem DOM, 100% testado
   i18n/        tradutor + dicionários en/pt-BR
   sip/         validação de conta, repositório de contas, máquinas de estado de
-               registro e de chamada
+               registro e de chamada, descoberta de transporte, codec SIP e
+               autenticação digest
   config/      carga de contas de desenvolvimento a partir do ambiente
 src/main/      processo principal do Electron: janelas, IPC, armazenamento,
-               atualização automática, adaptador sip.js
+               atualização automática
+  sip/         pilha SIP nativa: sonda de transporte, sockets, transações REGISTER
 src/preload/   superfície do contextBridge — o único caminho entre renderer e main
 src/renderer/  UI em React; todo texto passa por t()
 src/shared/    o contrato de IPC compartilhado pelos três processos
 ```
 
-A regra que mantém isso testável: **toda transição de estado vive em `src/core` como
-função pura.** O `src/main/sip-engine.ts` é um adaptador fino, que apenas traduz
-eventos do sip.js em eventos do domínio — e é por isso que o domínio pode ser testado
-de forma exaustiva sem nenhum PBX.
+A regra que mantém isso testável: **toda decisão vive em `src/core` como função
+pura** — transições de estado, ordenação de transporte, enquadramento de mensagens,
+resposta digest. O `src/main/sip` só cuida de sockets e DNS, alimentando os redutores
+do núcleo — e é por isso que o protocolo inteiro pode ser testado sem nenhum PBX.
+
+### Situação atual
+
+| Capacidade | Estado |
+| --- | --- |
+| Múltiplas contas, validação, persistência | funcionando |
+| Descoberta automática de transporte (SRV + sonda) | funcionando |
+| Registro sobre TCP, TLS, UDP, WS, WSS | funcionando |
+| Sinalização de chamada recebida: tocar, atender, rejeitar, encerrar | funcionando |
+| **Áudio bidirecional (RTP/G.711)** | **ainda não — próximo marco** |
+
+Atender uma chamada hoje conclui apenas a sinalização SIP. O caminho de mídia RTP é o
+próximo marco, e está declarado abertamente em vez de insinuado.
 
 ## Portões de qualidade
 

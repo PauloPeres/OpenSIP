@@ -11,6 +11,14 @@ Feature: Multi-account registration
     And the account "Home" is "registered"
     And 2 accounts are configured
 
+  Scenario: An account can pin an explicit server
+    Given no SIP accounts are configured
+    When I add the account "Work" for "alice" on "sip.example.com"
+    And I add the account "Lab" for "bob" on "lab.example.com" pinned to the server "tcp://pbx.lab:5060"
+    Then the account "Work" discovers its transport automatically
+    And the account "Lab" is pinned to the server "tcp://pbx.lab:5060"
+    And 2 accounts are configured
+
   Scenario: A duplicate account is rejected
     Given the account "Work" for "alice" on "sip.example.com" is configured
     When I add the account "Work copy" for "ALICE" on "SIP.example.com"
