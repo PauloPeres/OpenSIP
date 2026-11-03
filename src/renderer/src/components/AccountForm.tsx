@@ -3,7 +3,8 @@ import type { FormEvent } from 'react';
 import type { SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
 import type { AccountDraft, SaveAccountResult } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
-import { ActionButton } from './StatusBadge';
+import { Button } from './ui/Button';
+import { FormField } from './ui/Field';
 
 type FieldName = keyof SipAccountInput;
 type Values = Readonly<Record<FieldName, string>>;
@@ -77,8 +78,7 @@ function Field({ def, value, issues, onChange }: FieldProps): JSX.Element {
   const { t } = useTranslation();
   const placeholder = def.placeholder ? t(`accounts.placeholder.${def.name}`) : undefined;
   return (
-    <div className="field">
-      <label htmlFor={def.name}>{t(`accounts.field.${def.name}`)}</label>
+    <FormField id={def.name} label={t(`accounts.field.${def.name}`)}>
       <input
         id={def.name}
         type={def.type}
@@ -88,7 +88,7 @@ function Field({ def, value, issues, onChange }: FieldProps): JSX.Element {
         onChange={(event) => onChange(def.name, event.target.value)}
       />
       <FieldErrors issues={issues} />
-    </div>
+    </FormField>
   );
 }
 
@@ -123,8 +123,8 @@ function FormActions({ onCancel }: { readonly onCancel: () => void }): JSX.Eleme
   const { t } = useTranslation();
   return (
     <div className="row">
-      <ActionButton submit variant="primary" label={t('accounts.save')} onClick={() => undefined} />
-      <ActionButton label={t('accounts.cancel')} onClick={onCancel} />
+      <Button submit variant="primary" label={t('accounts.save')} onClick={() => undefined} />
+      <Button label={t('accounts.cancel')} onClick={onCancel} />
     </div>
   );
 }
@@ -158,7 +158,7 @@ export function AccountForm(props: AccountFormProps): JSX.Element {
   const group = { values, issues, onChange: change };
   const advancedHasIssue = issues.some((issue) => ADVANCED_FIELDS.some((def) => def.name === issue.field));
   return (
-    <form className="card form" onSubmit={submit}>
+    <form className="panel form" onSubmit={submit}>
       <FieldGroup defs={BASIC_FIELDS} {...group} />
       <details open={advancedHasIssue || undefined}>
         <summary>{t('accounts.advanced')}</summary>

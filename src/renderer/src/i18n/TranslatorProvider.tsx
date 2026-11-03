@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { FALLBACK_LOCALE, createTranslator } from '@core/i18n';
+import { getApi } from '../state/api';
 import type { Locale, TranslationParams } from '@core/i18n';
 
 export interface TranslationApi {
@@ -14,13 +15,13 @@ const TranslatorContext = createContext<TranslationApi | null>(null);
 function useLocaleState(): readonly [Locale, (next: Locale) => Promise<void>] {
   const [locale, setLocaleState] = useState<Locale>(FALLBACK_LOCALE);
   useEffect(() => {
-    window.opensip
+    getApi()
       .getLocale()
       .then(setLocaleState)
       .catch(() => setLocaleState(FALLBACK_LOCALE));
   }, []);
   const setLocale = useCallback(async (next: Locale): Promise<void> => {
-    setLocaleState(await window.opensip.setLocale(next));
+    setLocaleState(await getApi().setLocale(next));
   }, []);
   return [locale, setLocale];
 }

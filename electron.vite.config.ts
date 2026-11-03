@@ -16,6 +16,16 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     resolve: { alias: coreAlias },
     plugins: [react()],
-    build: { rollupOptions: { input: resolve(__dirname, 'src/renderer/index.html') } }
+    build: {
+      rollupOptions: {
+        input: {
+          // The visible UI.
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          // A hidden window that owns microphone capture and speaker playback.
+          // RTP sockets stay in the main process, so this one needs no Node access.
+          media: resolve(__dirname, 'src/renderer/media.html')
+        }
+      }
+    }
   }
 });

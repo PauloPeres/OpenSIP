@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AccountId } from '@core/sip';
-import type { AccountDraft, AppSnapshot, SaveAccountResult, UpdateStatus } from '../../../shared/api';
+import type {
+  AccountDraft,
+  AppSnapshot,
+  DialResult,
+  DtmfDigit,
+  OpenSipApi,
+  SaveAccountResult,
+  UpdateStatus
+} from '../../../shared/api';
+import { EMPTY_SNAPSHOT, getApi, normalizeSnapshot } from './api';
 
 export interface AppActions {
   readonly saveAccount: (draft: AccountDraft) => Promise<SaveAccountResult>;
@@ -10,6 +19,11 @@ export interface AppActions {
   readonly hangup: (callId: string) => Promise<void>;
   readonly hold: (callId: string) => Promise<void>;
   readonly resume: (callId: string) => Promise<void>;
+  readonly dial: (accountId: AccountId, target: string) => Promise<DialResult>;
+  readonly dtmf: (callId: string, digit: DtmfDigit) => Promise<void>;
+  readonly mute: (callId: string, muted: boolean) => Promise<void>;
+  readonly setDebug: (enabled: boolean) => Promise<boolean>;
+  readonly clearLogs: () => Promise<void>;
 }
 
 export interface AppState {
@@ -19,10 +33,8 @@ export interface AppState {
   readonly actions: AppActions;
 }
 
-const EMPTY_SNAPSHOT: AppSnapshot = { accounts: [], calls: [], locale: 'en' };
-
 function buildActions(): AppActions {
-  const api = window.opensip;
+  const api = getApi();
   return {
     saveAccount: (draft) => api.saveAccount(draft),
     deleteAccount: (id) => api.deleteAccount(id),
@@ -30,16 +42,22 @@ function buildActions(): AppActions {
     reject: (id) => api.rejectCall(id),
     hangup: (id) => api.hangupCall(id),
     hold: (id) => api.holdCall(id),
-    resume: (id) => api.resumeCall(id)
+    resume: (id) => api.resumeCall(id),
+    dial: (accountId, target) => api.dial(accountId, target),
+    dtmf: (id, digit) => api.sendDtmf(id, digit),
+    mute: (id, muted) => api.setMuted(id, muted),
+    setDebug: (enabled) => api.setDebugLogging(enabled),
+    clearLogs: () => api.clearLogs()
   };
 }
 
 function subscribeAll(
+  api: OpenSipApi,
   onSnapshot: (snapshot: AppSnapshot) => void,
   onUpdate: (status: UpdateStatus) => void
 ): () => void {
-  const offSnapshot = window.opensip.onSnapshot(onSnapshot);
-  const offUpdate = window.opensip.onUpdateStatus(onUpdate);
+  const offSnapshot = api.onSnapshot((snapshot) => onSnapshot(normalizeSnapshot(snapshot)));
+  const offUpdate = api.onUpdateStatus(onUpdate);
   return (): void => {
     offSnapshot();
     offUpdate();
@@ -51,8 +69,12 @@ export function useAppState(): AppState {
   const [update, setUpdate] = useState<UpdateStatus>({ kind: 'idle' });
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    window.opensip.getSnapshot().then(setSnapshot).catch(() => setFailed(true));
-    return subscribeAll(setSnapshot, setUpdate);
+    const api = getApi();
+    api
+      .getSnapshot()
+      .then((raw) => setSnapshot(normalizeSnapshot(raw)))
+      .catch(() => setFailed(true));
+    return subscribeAll(api, setSnapshot, setUpdate);
   }, []);
   const actions = useMemo(buildActions, []);
   return { snapshot, update, failed, actions };

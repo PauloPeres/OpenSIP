@@ -1,6 +1,7 @@
 import { SUPPORTED_LOCALES } from '@core/i18n';
 import type { Locale } from '@core/i18n';
 import type { UpdateStatus } from '../../../shared/api';
+import { SelectField } from './ui/Field';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { TranslationApi } from '../i18n/TranslatorProvider';
 
@@ -26,28 +27,16 @@ function updateText(t: TranslationApi['t'], status: UpdateStatus): string {
 
 function LanguageSelect(): JSX.Element {
   const { t, locale, setLocale } = useTranslation();
+  const options = SUPPORTED_LOCALES.map((code) => ({ value: code, label: t(LOCALE_KEYS[code]) }));
   return (
-    <div className="field">
-      <label htmlFor="language">{t('settings.language')}</label>
-      <select
-        id="language"
-        value={locale}
-        onChange={(event) => void setLocale(event.target.value as Locale)}
-      >
-        {SUPPORTED_LOCALES.map((code) => (
-          <option key={code} value={code}>
-            {t(LOCALE_KEYS[code])}
-          </option>
-        ))}
-      </select>
-    </div>
+    <SelectField id="language" label={t('settings.language')} value={locale} options={options} onChange={(value) => void setLocale(value as Locale)} />
   );
 }
 
 export function SettingsPanel({ update }: { readonly update: UpdateStatus }): JSX.Element {
   const { t } = useTranslation();
   return (
-    <div className="card form">
+    <div className="panel form">
       <LanguageSelect />
       <p className="muted" role="status">
         {updateText(t, update)}
