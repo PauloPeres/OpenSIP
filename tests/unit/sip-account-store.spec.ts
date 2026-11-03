@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createAccount } from '../../src/core/sip/account';
 import { AccountValidationError } from '../../src/core/sip/account';
 import {
@@ -87,11 +87,86 @@ describe('account store', () => {
   });
 });
 
+describe('account store error shapes', () => {
+  it('DuplicateAccountError carries name, message and messageKey', () => {
+    const error = new DuplicateAccountError();
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('DuplicateAccountError');
+    expect(error.message).toBe('duplicate-account');
+    expect(error.messageKey).toBe('accounts.validation.duplicate');
+  });
+
+  it('AccountNotFoundError carries name, message and accountId', () => {
+    const error = new AccountNotFoundError('zz');
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('AccountNotFoundError');
+    expect(error.message).toBe('account-not-found');
+    expect(error.accountId).toBe('zz');
+  });
+
+  it('getAccount throws an error whose name, message and id are exact', () => {
+    expect(() => getAccount(emptyAccountStore, 'zz')).toThrow(
+      expect.objectContaining({ name: 'AccountNotFoundError', message: 'account-not-found', accountId: 'zz' })
+    );
+  });
+
+  it('addAccount throws an error whose name and message are exact', () => {
+    const state = addAccount(emptyAccountStore, make('a'));
+    expect(() => addAccount(state, make('b'))).toThrow(
+      expect.objectContaining({ name: 'DuplicateAccountError', message: 'duplicate-account' })
+    );
+  });
+});
+
+describe('account store uniqueness', () => {
+  const a = make('a');
+  const b = make('b', { username: 'bob' });
+  const c = make('c', { username: 'carol', domain: 'other.example.com' });
+
+  it('adds a distinct account to a populated store and keeps every entry', () => {
+    const next = addAccount(addAccount(emptyAccountStore, a), b);
+    expect(next).toEqual({ a, b });
+  });
+
+  it('adds a third account that differs from each existing one', () => {
+    const next = addAccount(addAccount(addAccount(emptyAccountStore, a), b), c);
+    expect(Object.keys(next)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('detects a clash with the LAST account, not only the first', () => {
+    const state = addAccount(addAccount(emptyAccountStore, a), b);
+    expect(() => addAccount(state, make('d', { username: 'BOB' }))).toThrow(DuplicateAccountError);
+  });
+
+  it('detects a clash with the FIRST account when others differ', () => {
+    const state = addAccount(addAccount(emptyAccountStore, a), b);
+    expect(() => addAccount(state, make('d', { username: 'ALICE' }))).toThrow(DuplicateAccountError);
+  });
+
+  it('a clash needs both user and domain: same domain, different user is fine', () => {
+    const state = addAccount(emptyAccountStore, a);
+    expect(() => addAccount(state, make('d', { username: 'zed' }))).not.toThrow();
+  });
+
+  it('a clash needs a different id: re-adding the same key under the same id is a duplicate-id error, not a no-op', () => {
+    const state = addAccount(emptyAccountStore, a);
+    expect(() => addAccount(state, a)).toThrow(DuplicateAccountError);
+  });
+
+  it('updating an account keeps its own key without a clash among several accounts', () => {
+    const state = addAccount(addAccount(emptyAccountStore, a), b);
+    const next = updateAccount(state, 'b', { password: 'new' });
+    expect(next['b']?.password).toBe('new');
+    expect(next['a']).toBe(a);
+  });
+});
+
 describe('updateAccount', () => {
-  const state = addAccount(
-    addAccount(emptyAccountStore, make('a')),
-    make('b', { username: 'bob', displayName: 'Home' })
-  );
+  // Built per test (not at collection time) so a mutated addAccount fails a test instead of the whole file.
+  let state = emptyAccountStore;
+  beforeEach(() => {
+    state = addAccount(addAccount(emptyAccountStore, make('a')), make('b', { username: 'bob', displayName: 'Home' }));
+  });
 
   it('merges the patch, revalidates and rebuilds the uri', () => {
     const next = updateAccount(state, 'a', { username: ' carol ', registerExpires: 120 });

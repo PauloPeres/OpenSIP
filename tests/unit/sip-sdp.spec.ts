@@ -1,13 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  MalformedSdpError,
-  NoCommonCodecError,
-  buildOffer,
-  holdDirection,
-  negotiate,
-  parseSdp,
-  resumeDirection
-} from '../../src/core/sip/sdp';
+import { MalformedSdpError, NoCommonCodecError, UnknownPayloadTypeError, buildOffer, holdDirection, negotiate, parseSdp, resumeDirection } from '../../src/core/sip/sdp';
 import type { SdpMedia, SessionDescription } from '../../src/core/sip/sdp';
 
 const base = { address: '192.168.1.20', port: 40000, sessionId: '12345' };
@@ -239,3 +231,88 @@ describe('hold and resume directions', () => {
     expect(resumeDirection(from)).toBe(to);
   });
 });
+
+describe('parseSdp mutation-hardening cases', () => {
+  it('does not take a direction from a video section that precedes the audio section', () => {
+    const sdp = parseSdp(
+      'v=0\r\nc=IN IP4 1.2.3.4\r\nm=video 5000 RTP/AVP 96\r\na=inactive\r\nm=audio 4000 RTP/AVP 0\r\n'
+    );
+    expect(sdp.audio.port).toBe(4000);
+    expect(sdp.audio.payloadTypes).toEqual([0]);
+    expect(sdp.audio.direction).toBe('sendrecv');
+  });
+
+  it('accepts an m=audio line on the very first line when it carries its own c= line', () => {
+    const sdp = parseSdp('m=audio 4000 RTP/AVP 0\r\nc=IN IP4 1.2.3.4\r\n');
+    expect(sdp.connectionAddress).toBe('1.2.3.4');
+    expect(sdp.audio.port).toBe(4000);
+    expect(sdp.origin).toEqual({ username: '-', sessionId: '0', version: '0', address: '1.2.3.4' });
+  });
+
+  it('lets an explicit audio sendrecv override a session-level direction', () => {
+    const sdp = parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\na=sendonly\r\nm=audio 4000 RTP/AVP 0\r\na=sendrecv\r\n');
+    expect(sdp.audio.direction).toBe('sendrecv');
+  });
+
+  it('lets an audio direction override a session-level direction', () => {
+    const sdp = parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\na=sendrecv\r\nm=audio 4000 RTP/AVP 0\r\na=recvonly\r\n');
+    expect(sdp.audio.direction).toBe('recvonly');
+  });
+
+  it('ignores non-attribute lines whose text looks like a direction', () => {
+    const sdp = parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 4000 RTP/AVP 0\r\nx=recvonly\r\nb=inactive\r\n');
+    expect(sdp.audio.direction).toBe('sendrecv');
+  });
+
+  it('ignores an a= attribute that is not a direction', () => {
+    const sdp = parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 4000 RTP/AVP 0\r\na=ptime:20\r\n');
+    expect(sdp.audio.direction).toBe('sendrecv');
+  });
+
+  it('rejects ports that are not purely digits', () => {
+    for (const port of ['12ab', 'ab12', '-1', '1.5', '+80']) {
+      expect(() => parseSdp(`v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio ${port} RTP/AVP 0\r\n`)).toThrow(MalformedSdpError);
+    }
+  });
+
+  it('accepts port 65535 and rejects 65536', () => {
+    expect(parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 65535 RTP/AVP 0\r\n').audio.port).toBe(65535);
+    expect(() => parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 65536 RTP/AVP 0\r\n')).toThrow(MalformedSdpError);
+  });
+
+  it('records an rtpmap line without a codec as an empty name', () => {
+    const sdp = parseSdp('v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 4000 RTP/AVP 96\r\na=rtpmap:96\r\n');
+    expect(sdp.audio.rtpmap).toEqual({ 96: '' });
+  });
+});
+
+describe('buildOffer rejects codecs it cannot name', () => {
+  const offer = (payloadTypes: readonly number[]): string =>
+    buildOffer({ address: '10.0.0.1', port: 40000, sessionId: '1', payloadTypes });
+
+  it('throws UnknownPayloadTypeError rather than emitting an empty rtpmap', () => {
+    expect(() => offer([3])).toThrow(UnknownPayloadTypeError);
+  });
+
+  it('names the offending payload type on the error', () => {
+    try {
+      offer([99]);
+      expect.unreachable('buildOffer should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnknownPayloadTypeError);
+      expect((error as UnknownPayloadTypeError).payloadType).toBe(99);
+      expect((error as UnknownPayloadTypeError).name).toBe('UnknownPayloadTypeError');
+      expect((error as UnknownPayloadTypeError).message).toBe('unknown-payload-type');
+    }
+  });
+
+  it('rejects the whole offer when only one of several types is unknown', () => {
+    expect(() => offer([0, 8, 42])).toThrow(UnknownPayloadTypeError);
+  });
+
+  it('still builds an offer for every type it does know', () => {
+    expect(offer([0, 8])).toContain('a=rtpmap:0 PCMU/8000');
+    expect(offer([0, 8])).toContain('a=rtpmap:8 PCMA/8000');
+    expect(offer([8])).toContain('a=rtpmap:101 telephone-event/8000');
+  });
+})

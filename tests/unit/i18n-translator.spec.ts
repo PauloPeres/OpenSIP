@@ -178,3 +178,30 @@ describe('resolveLocale alias table', () => {
     }
   );
 });
+
+describe('translator error messages', () => {
+  it('MissingTranslationError message names the key and the locale', () => {
+    const error = new MissingTranslationError('a.b', 'pt-BR');
+    expect(error.message).toBe('Missing translation for "a.b" in locale "pt-BR"');
+    expect(() => createTranslator('en').t('no.such.key')).toThrow(
+      'Missing translation for "no.such.key" in locale "en"'
+    );
+  });
+
+  it('MissingTranslationParamError carries name, key, param and a descriptive message', () => {
+    const t = createTranslator('en', { en: { greet: 'Hi {name}' }, 'pt-BR': {} });
+    let caught: unknown;
+    try {
+      t.t('greet');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(MissingTranslationParamError);
+    expect(caught).toMatchObject({
+      name: 'MissingTranslationParamError',
+      key: 'greet',
+      param: 'name',
+      message: 'Missing param "name" for translation "greet"'
+    });
+  });
+});

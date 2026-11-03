@@ -210,3 +210,56 @@ describe('redactDetails', () => {
     expect(redactDetails({})).toEqual({});
   });
 });
+
+describe('redactSipMessage mutation-hardening cases', () => {
+  it('trims trailing whitespace from an authentication header value yet still parses it', () => {
+    expect(redactSipMessage('Authorization: Digest username="a", response="abc"   \r\n\r\n')).toBe(
+      'Authorization: Digest username="a", response="[redacted]"\r\n\r\n'
+    );
+  });
+
+  it('keeps a leading continuation-looking line when there is no header before it', () => {
+    expect(redactSipMessage(' orphan continuation\r\nCSeq: 1 OPTIONS\r\n\r\n')).toBe(
+      ' orphan continuation\r\nCSeq: 1 OPTIONS\r\n\r\n'
+    );
+  });
+
+  it('redacts an authentication header in a bare-LF message', () => {
+    const msg = `REGISTER sip:b SIP/2.0\nAuthorization: Digest username="a", response="${HASH}"\nCSeq: 2 REGISTER\n\n`;
+    const out = redactSipMessage(msg);
+    expect(out).toBe(
+      `REGISTER sip:b SIP/2.0\nAuthorization: Digest username="a", response="${R}"\nCSeq: 2 REGISTER\n\n`
+    );
+    expect(out).not.toContain(HASH);
+  });
+
+  it('redacts a folded header in a bare-LF message and keeps the fold', () => {
+    const out = redactSipMessage(`REGISTER sip:b SIP/2.0\nAuthorization: Digest username="a",\n response="${HASH}"\n\n`);
+    expect(out).not.toContain(HASH);
+    expect(out).toContain('username="a", response="[redacted]"');
+  });
+
+  it('keeps an SDP body when the media type is followed by whitespace before the parameters', () => {
+    const sdp = 'v=0\r\ns=-\r\n';
+    const msg = `X: 1\r\nContent-Type: application/sdp ;charset=utf-8\r\n\r\n${sdp}`;
+    expect(redactSipMessage(msg)).toBe(msg);
+  });
+
+  it('keeps an SDP body when the media type is padded with trailing spaces', () => {
+    const sdp = 'v=0\r\ns=-\r\n';
+    const msg = `X: 1\r\nContent-Type: application/sdp   \r\n\r\n${sdp}`;
+    expect(redactSipMessage(msg)).toBe(msg);
+  });
+
+  it('replaces the body of a message whose only content-type-like line is not a header', () => {
+    expect(redactSipMessage(`X: 1\r\nnot a header line\r\n\r\nbody ${PASSWORD}`)).toBe(
+      `X: 1\r\nnot a header line\r\n\r\n${R}`
+    );
+  });
+
+  it('preserves quoting style: quoted values stay quoted, unquoted stay bare', () => {
+    expect(redactSipMessage('Authorization: Digest nonce="n", opaque=o, rspauth="r"')).toBe(
+      'Authorization: Digest nonce="[redacted]", opaque=[redacted], rspauth="[redacted]"'
+    );
+  });
+});

@@ -74,10 +74,33 @@ export function resumeDirection(current: SdpDirection): SdpDirection {
   return RESUME[current];
 }
 
+/**
+ * A payload type with no entry in RTPMAP would render as `a=rtpmap:<n> ` with an
+ * empty codec name, which is invalid SDP. Refuse loudly instead of putting that
+ * on the wire, where the far end's failure would be far harder to trace back.
+ */
+export class UnknownPayloadTypeError extends Error {
+  readonly payloadType: number;
+
+  constructor(payloadType: number) {
+    super('unknown-payload-type');
+    this.name = 'UnknownPayloadTypeError';
+    this.payloadType = payloadType;
+  }
+}
+
+function codecName(type: number): string {
+  const name = RTPMAP[type];
+  if (name === undefined) {
+    throw new UnknownPayloadTypeError(type);
+  }
+  return name;
+}
+
 function mediaLines(port: number, types: readonly number[], direction: SdpDirection): string[] {
   return [
     `m=audio ${port} RTP/AVP ${types.join(' ')}`,
-    ...types.map((type) => `a=rtpmap:${type} ${RTPMAP[type] ?? ''}`),
+    ...types.map((type) => `a=rtpmap:${type} ${codecName(type)}`),
     `a=fmtp:${TELEPHONE_EVENT} 0-16`,
     'a=ptime:20',
     `a=${direction}`
