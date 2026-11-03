@@ -1,0 +1,57 @@
+{
+  "name": "opensip",
+  "version": "0.1.0",
+  "description": "Free and open source multi-account SIP softphone",
+  "license": "MIT",
+  "author": "OpenSIP Contributors",
+  "private": false,
+  "main": "out/main/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:bdd": "cucumber-js",
+    "gate:crap": "node scripts/quality/crap.mjs",
+    "gate:i18n": "node scripts/quality/i18n-gate.mjs",
+    "gate:dry": "jscpd src",
+    "gate:mutation": "stryker run",
+    "verify": "npm run typecheck && npm run lint && npm run gate:i18n && npm run test:coverage && npm run test:bdd && npm run gate:crap && npm run gate:dry"
+  },
+  "dependencies": {
+    "electron-updater": "6.3.9",
+    "sip.js": "0.21.2"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "11.1.1",
+    "@eslint/js": "9.15.0",
+    "@stryker-mutator/core": "8.6.0",
+    "@stryker-mutator/vitest-runner": "8.6.0",
+    "@types/node": "22.9.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.3",
+    "@vitest/coverage-v8": "2.1.5",
+    "electron": "33.2.0",
+    "electron-builder": "25.1.8",
+    "electron-vite": "2.3.0",
+    "eslint": "9.15.0",
+    "eslint-plugin-react-hooks": "5.0.0",
+    "jscpd": "4.0.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3",
+    "typescript-eslint": "8.15.0",
+    "vite": "5.4.11",
+    "vitest": "2.1.5"
+  }
+}

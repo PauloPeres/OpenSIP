@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+coverage/
+reports/
+.DS_Store
+*.log
+.vite/
+
+# Local secrets
+.env
+.env.local
+.env.*.local

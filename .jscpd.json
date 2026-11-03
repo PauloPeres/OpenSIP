@@ -1,0 +1,10 @@
+{
+  "threshold": 0,
+  "minTokens": 40,
+  "minLines": 5,
+  "reporters": ["consoleFull"],
+  "absolute": true,
+  "gitignore": true,
+  "ignore": ["**/locales/**", "**/*.json"],
+  "format": ["typescript", "tsx"]
+}
