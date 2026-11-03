@@ -5,6 +5,7 @@ import type { SipMessage, SipRequest, SipResponse, TransportCandidate } from '..
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
 import { openConnection } from '../../src/main/sip/connection';
+import { buildRegisterRequest } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
 import { createMediaBridge } from '../../src/main/media/media-window';
@@ -20,7 +21,7 @@ import {
 
 vi.mock('../../src/main/windows', () => ({ log: (): void => undefined }));
 
-const udp = vi.hoisted(() => ({ sockets: [] as unknown[] }));
+const udp = vi.hoisted(() => ({ sockets: [] as unknown[], lan: '192.168.1.50' }));
 
 /** A dgram socket fake that, like the kernel, drops foreign sources once `connect` has been called. */
 vi.mock('node:dgram', async () => {
@@ -39,7 +40,7 @@ vi.mock('node:dgram', async () => {
       queueMicrotask(() => this.emit('listening'));
     }
     address(): { address: string; port: number; family: string } {
-      return { address: '0.0.0.0', port: 40123, family: 'IPv4' };
+      return { address: this.connected ? udp.lan : '0.0.0.0', port: 40123, family: 'IPv4' };
     }
     send(text: string, ...rest: unknown[]): void {
       const done = rest.find((item) => typeof item === 'function') as ((error?: Error) => void) | undefined;
@@ -1287,6 +1288,7 @@ describe('UDP connection', () => {
   const candidate = { transport: 'udp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
   const ringing = 'SIP/2.0 180 Ringing\r\nCall-ID: abc\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n';
   type Fake = {
+    connected: boolean;
     sent: { text: string; port: number | undefined; host: string | undefined }[];
     receive: (data: string, from: { address: string; port: number }, server: { host: string; port: number }) => void;
   };
@@ -1304,8 +1306,30 @@ describe('UDP connection', () => {
   it('reports the bound local port and sends to an explicit destination', async () => {
     const connection = await openConnection(candidate);
     const socket = udp.sockets.at(-1) as Fake;
-    expect(connection.localAddress).toEqual({ host: '0.0.0.0', port: 40123 });
+    expect(connection.localAddress).toEqual({ host: udp.lan, port: 40123 });
+    expect(socket.connected).toBe(false);
     await connection.send({ kind: 'response', status: 200, reason: 'OK', headers: {}, body: '' } as unknown as SipMessage);
     expect(socket.sent[0]).toMatchObject({ port: 5060, host: '203.0.113.5' });
+  });
+
+  it('never reports the unspecified address as the local host of a wildcard-bound socket', async () => {
+    const connection = await openConnection(candidate);
+    expect(connection.localAddress.host).not.toBe('0.0.0.0');
+    expect(connection.localAddress.host).toBe(udp.lan);
+  });
+
+  it('puts that address, never 0.0.0.0, in the Via sent-by of REGISTER and INVITE', async () => {
+    const real = await openConnection(candidate);
+    const ids = { newBranch: () => 'z9hG4bKtest', newTag: () => 'tag', newCallId: (h: string) => `cid@${h}`, newCnonce: () => 'cn' };
+    const account = createAccount({ displayName: 'Me', username: '1000', password: 's', domain: 'pbx.test' }, 'acc1');
+    const register = buildRegisterRequest({ account, candidate, expires: 300, localAddress: real.localAddress }, ids, 1);
+    expect(headerValue(register.headers, 'via')).toBe(`SIP/2.0/UDP ${udp.lan}:40123;branch=z9hG4bKtest;rport`);
+    const h = harness();
+    Object.assign(h.pbx.connection, { localAddress: real.localAddress });
+    await registered(h);
+    await h.engine.dial('acc1', '1001');
+    const invite = h.pbx.requests('INVITE')[0] as SipRequest;
+    expect(headerValue(invite.headers, 'via')).toMatch(new RegExp(`^SIP/2\\.0/UDP ${udp.lan}:40123;branch=\\S+;rport$`));
+    expect(JSON.stringify([register, invite])).not.toContain('0.0.0.0');
   });
 });

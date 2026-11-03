@@ -1,6 +1,7 @@
 import { createSocket } from 'node:dgram';
 import type { RemoteInfo, Socket as DgramSocket } from 'node:dgram';
 import { connect as netConnect } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import type { Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 import { extractMessages, parse, serialize } from '@core/sip';
@@ -160,6 +161,30 @@ function noteForeignSource(candidate: TransportCandidate, seen: Set<string>): (i
   };
 }
 
+const UNSPECIFIED = '0.0.0.0';
+
+/** First non-loopback IPv4 of this machine; loopback only when there is none. A Via must never say 0.0.0.0. */
+function fallbackAddress(): string {
+  const all = Object.values(networkInterfaces()).flatMap((list) => list ?? []);
+  return all.find((item) => item.family === 'IPv4' && !item.internal)?.address ?? '127.0.0.1';
+}
+
+/**
+ * Asks the kernel which local address routes to the server. A connected UDP socket sends nothing, it only
+ * selects a route, so this probe is closed at once; the real socket stays unconnected (see openDatagram).
+ */
+function egressAddress(candidate: TransportCandidate): Promise<string> {
+  return new Promise((resolve) => {
+    const probe = createSocket('udp4');
+    const finish = (address: string | undefined): void => {
+      probe.close();
+      resolve(address === undefined || address === UNSPECIFIED ? fallbackAddress() : address);
+    };
+    probe.once('error', () => finish(undefined));
+    probe.connect(candidate.port, candidate.host, () => finish(probe.address().address));
+  });
+}
+
 function bindDatagram(socket: DgramSocket): Promise<void> {
   return new Promise((resolve) => {
     socket.once('listening', resolve);
@@ -175,6 +200,7 @@ function bindDatagram(socket: DgramSocket): Promise<void> {
  * so we bind, send with an explicit destination and accept datagrams from anywhere.
  */
 async function openDatagram(candidate: TransportCandidate): Promise<SipConnection> {
+  const address = await egressAddress(candidate);
   const socket = createSocket('udp4');
   const hub = createHub();
   const noteSource = noteForeignSource(candidate, new Set());
@@ -185,7 +211,7 @@ async function openDatagram(candidate: TransportCandidate): Promise<SipConnectio
   socket.on('error', (error) => hub.end(reasonOf(error)));
   socket.on('close', () => hub.end('closed'));
   await bindDatagram(socket);
-  const { address, port } = socket.address();
+  const { port } = socket.address();
   const write = (text: string): Promise<void> =>
     new Promise((resolve, reject) =>
       socket.send(text, candidate.port, candidate.host, (error) => (error ? reject(error) : resolve()))
