@@ -61,6 +61,7 @@ import type {
   TransportCandidate
 } from '@core/sip';
 import type { CallView, DialResult, DtmfDigit } from '../../shared/api';
+import { SETUP_IN_PROGRESS_KEY, isOutboundInSetup } from '../../shared/api';
 import { allocateRtpPort, createRtpSession } from '../media/rtp-session';
 import type { RtpSession, RtpSessionOptions } from '../media/rtp-session';
 import type { MediaBridge } from '../media/media-window';
@@ -456,7 +457,11 @@ const noMedia: MediaBridge = {
 
 const defaultRtp: RtpFactory = {
   allocatePort: () => allocateRtpPort(),
-  create: (options) => createRtpSession(options, { onError: (error) => log('warn', `rtp: ${String(error)}`) })
+  create: (options) =>
+    createRtpSession(options, {
+      onError: (error) => log('warn', `rtp: ${String(error)}`),
+      onNotice: (level, message) => log(level, message)
+    })
 };
 
 const defaultDeps = (): EngineDeps => ({
@@ -712,6 +717,7 @@ export class SipEngine {
     if (entry?.connection === undefined || entry.snapshot.state !== 'registered') return fail('calls.error.notRegistered');
     const uri = this.normalise(target, entry.account.domain);
     if (uri === undefined) return fail('calls.error.invalidTarget');
+    if (Object.values(this.registry).some((call) => isOutboundInSetup(call, accountId))) return fail(SETUP_IN_PROGRESS_KEY);
     const callId = this.deps.ids.newCallId(reachableAt(entry.connection).host);
     this.forgetFinished(accountId);
     const refusal = this.openOutgoing({ id: callId, accountId, target: uri });
@@ -968,6 +974,7 @@ export class SipEngine {
   /** Hold keeps the stream alive but silent; the user's own mute state is reported separately. */
   private applyMute(dialog: Dialog): void {
     dialog.media?.session.setMuted(dialog.muted || dialog.held);
+    dialog.media?.session.setHeld(dialog.held);
   }
 
   /** The peer moved its media (or we learned it late): restart the session on the same local port. */

@@ -28,6 +28,7 @@ export const IPC = {
   setLocale: 'opensip:locale:set',
   setDebugLogging: 'opensip:logs:debug',
   clearLogs: 'opensip:logs:clear',
+  copyText: 'opensip:clipboard:copy',
   openSystemSettings: 'opensip:system:settings',
   micPermission: 'opensip:system:mic',
   updateStatus: 'opensip:update:status'
@@ -86,6 +87,14 @@ export interface AppSnapshot {
   readonly debugLogging: boolean;
 }
 
+/** Why a dial was refused because the same account is still setting up another outbound call. */
+export const SETUP_IN_PROGRESS_KEY = 'calls.error.setupInProgress'; // i18n-exempt: translation key
+
+/** True for an outbound call of `accountId` that has been placed but not yet answered. */
+export function isOutboundInSetup(call: CallSession, accountId: AccountId): boolean {
+  return call.accountId === accountId && call.direction === 'outbound' && call.state === 'connecting';
+}
+
 export type DialResult =
   | { readonly ok: true; readonly callId: string }
   | { readonly ok: false; readonly errorKey: string };
@@ -136,6 +145,8 @@ export interface OpenSipApi {
   /** Turns raw SIP message capture on or off; returns the resulting state. */
   setDebugLogging(enabled: boolean): Promise<boolean>;
   clearLogs(): Promise<void>;
+  /** Puts plain text on the system clipboard from the main process; resolves false when it was refused. */
+  copyText(text: string): Promise<boolean>;
   /** Opens the OS microphone privacy pane. Takes no argument: the target is fixed in the main process. */
   openSystemSettings(): Promise<void>;
   /** The OS's microphone grant. Takes no argument: ground truth the renderer cannot see itself. */

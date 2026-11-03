@@ -8,7 +8,7 @@ import {
   encodeRtp,
   SAMPLES_PER_FRAME
 } from '../../src/core/rtp';
-import type { RtpHeader } from '../../src/core/rtp';
+import type { Endpoint, RtpHeader } from '../../src/core/rtp';
 import { allocateRtpPort, createRtpSession } from '../../src/main/media/rtp-session';
 import type { RtpDeps, RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
 import { DTMF_DIGITS, isDtmfDigit } from '../../src/shared/api';
@@ -16,16 +16,19 @@ import { DTMF_DIGITS, isDtmfDigit } from '../../src/shared/api';
 const SSRC = 0xdeadbeef;
 const REMOTE = { host: '203.0.113.9', port: 40_002 };
 
+type Notice = readonly ['info' | 'warn', string];
+
 interface Sent {
   readonly data: Uint8Array;
   readonly port: number;
   readonly host: string;
 }
 
-function fakeDeps(): { deps: RtpDeps; sent: Sent[]; receive: (data: Uint8Array) => void; tick: () => void; state: { closed: number; cancelled: number; every: number | undefined } } {
+function fakeDeps(): { deps: RtpDeps; sent: Sent[]; notices: Notice[]; receive: (data: Uint8Array, from?: Endpoint) => void; tick: () => void; state: { closed: number; cancelled: number; every: number | undefined } } {
   const sent: Sent[] = [];
   const state = { closed: 0, cancelled: 0, every: undefined as number | undefined };
-  const handlers: { message?: (data: Uint8Array) => void; tick?: () => void } = {};
+  const notices: Notice[] = [];
+  const handlers: { message?: (data: Uint8Array, from: Endpoint) => void; tick?: () => void } = {};
   const deps: RtpDeps = {
     socket: {
       send: (data, port, host) => void sent.push({ data, port, host }),
@@ -39,13 +42,15 @@ function fakeDeps(): { deps: RtpDeps; sent: Sent[]; receive: (data: Uint8Array) 
         return () => void (state.cancelled += 1);
       }
     },
-    random: () => 1000
+    random: () => 1000,
+    onNotice: (level, message) => void notices.push([level, message])
   };
   return {
     deps,
     sent,
+    notices,
     state,
-    receive: (data) => handlers.message?.(data),
+    receive: (data, from = { host: REMOTE.host, port: REMOTE.port }) => handlers.message?.(data, from),
     tick: () => handlers.tick?.()
   };
 }
@@ -257,11 +262,11 @@ describe('inbound audio', () => {
     expect(session.stats.rxPackets).toBe(0);
   });
 
-  it('ignores datagrams that are not RTP and payloads that are not one frame', () => {
+  it('ignores datagrams that are not RTP and payloads that are not whole 10 ms slices', () => {
     const { session, receive } = start();
     receive(Uint8Array.of(1, 2, 3));
     receive(wire(1, new Uint8Array(0)));
-    receive(wire(2, new Uint8Array(80)));
+    receive(wire(2, new Uint8Array(100)));
     expect(session.stats.rxPackets).toBe(0);
   });
 
@@ -495,5 +500,340 @@ describe('allocateRtpPort', () => {
 
   it('gives up after a bounded number of attempts', async () => {
     await expect(allocateRtpPort({ isFree: async () => false, random: () => 0.1 })).rejects.toThrow();
+  });
+});
+
+/* ---------------------------------------------------- defect 2: packetisation */
+
+describe('inbound packetisation (10, 20, 30, 40 ms)', () => {
+  /** Streams `seconds` of a ramp in packets of `bytes`, ticking every 20 ms, returns the played frames. */
+  function playStream(bytes: number, packets: number): { frames: Int16Array[]; source: Int16Array; session: RtpSession } {
+    const { session, receive, tick } = start();
+    const frames = playback(session);
+    const source = Int16Array.from({ length: bytes * packets }, (_, i) => ((i * 53) % 7000) - 3500);
+    const encoded = encodeMuLaw(source);
+    for (let p = 0; p < packets; p += 1) receive(wire(p, encoded.slice(p * bytes, (p + 1) * bytes)));
+    const ticks = (bytes * packets) / SAMPLES_PER_FRAME;
+    for (let i = 0; i < ticks + 3; i += 1) tick();
+    return { frames, source: decodeMuLaw(encoded), session };
+  }
+
+  const flatten = (frames: Int16Array[]): number[] => frames.flatMap((f) => [...f]);
+
+  it.each([80, 160, 240, 320])('plays a %i-byte payload as the same audio, in whole 20 ms frames', (bytes) => {
+    const packets = 8;
+    const { frames, source, session } = playStream(bytes, packets);
+    expect(frames.every((f) => f.length === SAMPLES_PER_FRAME)).toBe(true);
+    const played = flatten(frames);
+    const first = played.findIndex((v) => v !== 0);
+    expect(played.slice(first, first + source.length - 1)).toEqual([...source].slice(first, first + source.length - 1));
+    expect(session.stats.rxPackets).toBe(packets);
+    expect(session.stats.lostPackets).toBe(0);
+  });
+
+  it.each([0, 40, 79, 100, 161, 410, 960 + 80])('drops a %i-byte payload, which is not whole 10 ms slices', (bytes) => {
+    const { session, receive } = start();
+    receive(wire(1, new Uint8Array(bytes)));
+    expect(session.stats.rxPackets).toBe(0);
+  });
+
+  it('accepts the longest supported payload (120 ms)', () => {
+    const { session, receive } = start();
+    receive(wire(1, new Uint8Array(960)));
+    expect(session.stats.rxPackets).toBe(1);
+  });
+
+  it('pulls from the jitter buffer only as fast as the samples are consumed (40 ms packets)', () => {
+    const { session, receive, tick } = start();
+    playback(session);
+    for (let p = 0; p < 6; p += 1) receive(wire(p, new Uint8Array(320).fill(0x10)));
+    for (let i = 0; i < 8; i += 1) tick();
+    expect(session.stats.lostPackets).toBe(0);
+  });
+
+  it('logs an unusable length once, not once per packet', () => {
+    const { receive, notices } = start();
+    for (let seq = 0; seq < 50; seq += 1) receive(wire(seq, new Uint8Array(100)));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.[0]).toBe('warn');
+    expect(notices[0]?.[1]).toContain('100-byte');
+  });
+
+  it('stays quiet while every payload is usable', () => {
+    const { receive, notices } = start();
+    [80, 160, 240, 320].forEach((bytes, seq) => receive(wire(seq, new Uint8Array(bytes))));
+    expect(notices).toEqual([]);
+  });
+
+  it('keeps sending our own audio at 20 ms', () => {
+    const { session, sent } = start();
+    session.sendPcm(ramp());
+    expect(decodeRtp(sent[0]?.data as Uint8Array).payload).toHaveLength(SAMPLES_PER_FRAME);
+  });
+
+  it('conceals a lost 40 ms packet with 40 ms of silence, keeping the timeline', () => {
+    const { session, receive, tick } = start();
+    const frames = playback(session);
+    [0, 1, 2, 4, 5].forEach((seq) => receive(wire(seq, new Uint8Array(320).fill(0x10))));
+    for (let i = 0; i < 12; i += 1) tick();
+    expect(session.stats.lostPackets).toBe(1);
+    const audible = frames.map((f) => f.some((v) => v !== 0));
+    expect(audible).toEqual([true, true, true, true, true, true, false, false, true, true, true, true]);
+  });
+});
+
+/* ----------------------------------------------------- defect 3: watchdog */
+
+describe('inbound inactivity watchdog', () => {
+  const TIMEOUT_MS = 200; // 10 ticks
+  const idle = (extra: Partial<RtpSessionOptions> = {}): ReturnType<typeof start> =>
+    start({ inboundTimeoutMs: TIMEOUT_MS, ...extra });
+  const ticks = (tick: () => void, count: number): void => {
+    for (let i = 0; i < count; i += 1) tick();
+  };
+  const stalled = (notices: Notice[]): Notice[] => notices.filter(([, text]) => text.includes('no inbound'));
+
+  it('stays silent one tick before the timeout', () => {
+    const { tick, notices } = idle();
+    ticks(tick, 9);
+    expect(stalled(notices)).toEqual([]);
+  });
+
+  it('warns on the tick that reaches the timeout', () => {
+    const { tick, notices } = idle();
+    ticks(tick, 10);
+    expect(stalled(notices)).toHaveLength(1);
+    expect(stalled(notices)[0]?.[0]).toBe('warn');
+    expect(stalled(notices)[0]?.[1]).toContain('0.2s');
+  });
+
+  it('warns once per episode, not on every later tick', () => {
+    const { tick, notices } = idle();
+    ticks(tick, 100);
+    expect(stalled(notices)).toHaveLength(1);
+  });
+
+  it('defaults to 30 s: silent at 1499 ticks, warns at 1500', () => {
+    const { tick, notices } = start();
+    ticks(tick, 1499);
+    expect(stalled(notices)).toEqual([]);
+    tick();
+    expect(stalled(notices)).toHaveLength(1);
+    expect(stalled(notices)[0]?.[1]).toContain('30s');
+  });
+
+  it('counts packets, not sound: a stream of silence keeps the call alive', () => {
+    const { tick, receive, notices } = idle();
+    for (let i = 0; i < 40; i += 1) {
+      receive(audioPacket(i, new Int16Array(SAMPLES_PER_FRAME)));
+      tick();
+    }
+    expect(notices).toEqual([]);
+  });
+
+  it('counts a packet with an unusable length as life', () => {
+    const { tick, receive, notices } = idle();
+    for (let i = 0; i < 40; i += 1) {
+      receive(wire(i, new Uint8Array(100)));
+      tick();
+    }
+    expect(stalled(notices)).toEqual([]);
+  });
+
+  it('counts a packet of any payload type as life', () => {
+    const { tick, receive, notices } = idle();
+    for (let i = 0; i < 40; i += 1) {
+      receive(wire(i, new Uint8Array(20), { payloadType: 13 }));
+      tick();
+    }
+    expect(stalled(notices)).toEqual([]);
+  });
+
+  it('is not fooled by garbage that is not RTP', () => {
+    const { tick, receive, notices } = idle();
+    for (let i = 0; i < 10; i += 1) {
+      receive(Uint8Array.of(1, 2, 3));
+      tick();
+    }
+    expect(stalled(notices)).toHaveLength(1);
+  });
+
+  it('restarts the count when a packet arrives one tick before the limit', () => {
+    const { tick, receive, notices } = idle();
+    ticks(tick, 9);
+    receive(audioPacket(1));
+    ticks(tick, 9);
+    expect(stalled(notices)).toEqual([]);
+    tick();
+    expect(stalled(notices)).toHaveLength(1);
+  });
+
+  it('reports recovery once, and can stall again afterwards', () => {
+    const { tick, receive, notices } = idle();
+    ticks(tick, 10);
+    receive(audioPacket(1));
+    receive(audioPacket(2));
+    expect(notices.filter(([, text]) => text.includes('resumed'))).toEqual([['info', 'rtp: inbound packets resumed']]);
+    ticks(tick, 10);
+    expect(stalled(notices)).toHaveLength(2);
+  });
+
+  it('does not say "resumed" when it never stalled', () => {
+    const { receive, notices } = idle();
+    receive(audioPacket(1));
+    expect(notices).toEqual([]);
+  });
+
+  it('pauses while the call is on hold, and starts counting afresh on resume', () => {
+    const { session, tick, notices } = idle();
+    session.setHeld(true);
+    ticks(tick, 100);
+    expect(notices).toEqual([]);
+    session.setHeld(false);
+    ticks(tick, 9);
+    expect(stalled(notices)).toEqual([]);
+    tick();
+    expect(stalled(notices)).toHaveLength(1);
+  });
+
+  it('clears a raised alarm when the call is put on hold', () => {
+    const { session, tick, receive, notices } = idle();
+    ticks(tick, 10);
+    session.setHeld(true);
+    receive(audioPacket(1));
+    expect(notices.filter(([, text]) => text.includes('resumed'))).toEqual([]);
+  });
+
+  it('never fires after close()', () => {
+    const { session, tick, notices } = idle();
+    session.close();
+    ticks(tick, 50);
+    expect(notices).toEqual([]);
+  });
+
+  it('works without a notice sink', () => {
+    const fake = fakeDeps();
+    createRtpSession(options({ inboundTimeoutMs: TIMEOUT_MS }), { socket: fake.deps.socket, timer: fake.deps.timer, random: fake.deps.random });
+    expect(() => ticks(fake.tick, 20)).not.toThrow();
+  });
+});
+
+/* ------------------------------------------------------ defect 4: latching */
+
+describe('symmetric RTP (latching)', () => {
+  const NAT: Endpoint = { host: '198.51.100.7', port: 55_000 };
+  const OTHER: Endpoint = { host: '192.0.2.99', port: 4000 };
+  const latest = (sent: Sent[]): Sent => sent[sent.length - 1] as Sent;
+  const frames = (env: ReturnType<typeof start>, source: Endpoint, count: number, from = 0, ssrc = 7): void => {
+    for (let i = 0; i < count; i += 1) env.receive(audioPacket(from + i, ramp(), ssrc), source);
+  };
+  function audioPacket(seq: number, pcm: Int16Array = ramp(seq), ssrc = 7): Uint8Array {
+    return wire(seq, encodeMuLaw(pcm), { ssrc });
+  }
+
+  it('sends to the SDP address until something proves otherwise', () => {
+    const env = start();
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('latches after 5 consecutive packets from one other source', () => {
+    const env = start();
+    frames(env, NAT, 5);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject({ host: NAT.host, port: NAT.port });
+    expect(env.notices.some(([level, text]) => level === 'info' && text.includes('latched'))).toBe(true);
+  });
+
+  it('does not latch one packet short of the confirmation count', () => {
+    const env = start();
+    frames(env, NAT, 4);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('does not latch on a single stray packet', () => {
+    const env = start();
+    frames(env, NAT, 1);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('a stray in the middle restarts the count', () => {
+    const env = start();
+    frames(env, NAT, 3);
+    frames(env, OTHER, 1, 3);
+    frames(env, NAT, 2, 4);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('requires one SSRC across the confirmation run', () => {
+    const env = start();
+    frames(env, NAT, 4);
+    frames(env, NAT, 1, 4, 99);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('requires consecutive sequence numbers across the run', () => {
+    const env = start();
+    [0, 1, 2, 3, 5].forEach((seq) => env.receive(audioPacket(seq), NAT));
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('never latches away from an address that is already delivering audio', () => {
+    const env = start();
+    frames(env, { host: REMOTE.host, port: REMOTE.port }, 1);
+    frames(env, NAT, 20, 1);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('never re-latches once latched', () => {
+    const env = start();
+    frames(env, NAT, 5);
+    frames(env, OTHER, 20, 5);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject({ host: NAT.host, port: NAT.port });
+  });
+
+  it('stops latching once the call is more than 10 s old (500 ticks)', () => {
+    const env = start();
+    for (let i = 0; i < 500; i += 1) env.tick();
+    frames(env, NAT, 20);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('still latches one tick before the window closes', () => {
+    const env = start();
+    for (let i = 0; i < 499; i += 1) env.tick();
+    frames(env, NAT, 5);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject({ host: NAT.host, port: NAT.port });
+  });
+
+  it('ignores packets of an unnegotiated payload type when latching', () => {
+    const env = start();
+    for (let i = 0; i < 10; i += 1) env.receive(wire(i, new Uint8Array(20), { payloadType: 13 }), NAT);
+    env.session.sendPcm(ramp());
+    expect(latest(env.sent)).toMatchObject(REMOTE);
+  });
+
+  it('counts telephone-event packets toward a latch', () => {
+    const env = start({ dtmfPayloadType: 101 });
+    for (let i = 0; i < 5; i += 1) env.receive(wire(i, Uint8Array.of(5, 10, 0, 160), { payloadType: 101 }), NAT);
+    env.session.sendDtmf('5');
+    expect(latest(env.sent)).toMatchObject({ host: NAT.host, port: NAT.port });
+  });
+
+  it('sends DTMF and audio to the latched address alike', () => {
+    const env = start({ dtmfPayloadType: 101 });
+    frames(env, NAT, 5);
+    env.session.sendPcm(ramp());
+    env.session.sendDtmf('1');
+    expect(env.sent.slice(-2).every((s) => s.host === NAT.host && s.port === NAT.port)).toBe(true);
   });
 });

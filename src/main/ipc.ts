@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { app, BrowserWindow, ipcMain, shell, systemPreferences } from 'electron';
+import { app, BrowserWindow, clipboard, ipcMain, shell, systemPreferences } from 'electron';
 import { createDiagnosticsLog } from '@core/diagnostics';
 import { isSupportedLocale, resolveLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
@@ -253,6 +253,17 @@ function registerMicPermissionHandler(): void {
   ipcMain.handle(IPC.micPermission, (): MicAccess => readMicAccess());
 }
 
+/** Text is data: the renderer chooses what to copy, never where it goes. Anything that is not a sane string is refused. */
+const MAX_COPY_CHARS = 5_000_000;
+
+function registerClipboardHandler(): void {
+  ipcMain.handle(IPC.copyText, (_event, text: unknown): boolean => {
+    if (typeof text !== 'string' || text.length > MAX_COPY_CHARS) return false;
+    clipboard.writeText(text);
+    return true;
+  });
+}
+
 function registerLogHandlers(controller: Controller): void {
   ipcMain.handle(IPC.setDebugLogging, (_event, enabled: unknown) => controller.setDebugLogging(enabled === true));
   ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
@@ -282,6 +293,7 @@ function registerHandlers(controller: Controller): void {
   registerCallHandlers(controller);
   registerMediaHandlers(controller);
   registerLogHandlers(controller);
+  registerClipboardHandler();
   registerSystemSettingsHandler();
   registerMicPermissionHandler();
 }

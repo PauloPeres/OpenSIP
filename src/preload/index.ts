@@ -35,6 +35,7 @@ const api: OpenSipApi = {
   setLocale: (locale) => ipcRenderer.invoke(IPC.setLocale, locale),
   setDebugLogging: (enabled) => ipcRenderer.invoke(IPC.setDebugLogging, enabled),
   clearLogs: () => ipcRenderer.invoke(IPC.clearLogs),
+  copyText: (text) => ipcRenderer.invoke(IPC.copyText, text),
   openSystemSettings: () => ipcRenderer.invoke(IPC.openSystemSettings),
   micPermission: () => ipcRenderer.invoke(IPC.micPermission),
   onSnapshot: (cb) => subscribe(IPC.subscribe, cb),

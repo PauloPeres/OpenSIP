@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createJitterBuffer } from '../../src/core/rtp/jitter';
+import { SEQUENCE_JUMP_THRESHOLD, createJitterBuffer } from '../../src/core/rtp/jitter';
 import type { JitterBuffer } from '../../src/core/rtp/jitter';
 import type { RtpPacket } from '../../src/core/rtp/packet';
 
-const pkt = (seq: number): RtpPacket => ({
+const pkt = (seq: number, ssrc = 1): RtpPacket => ({
   header: {
     version: 2,
     padding: false,
@@ -13,7 +13,7 @@ const pkt = (seq: number): RtpPacket => ({
     payloadType: 0,
     sequenceNumber: seq,
     timestamp: seq * 160,
-    ssrc: 1,
+    ssrc,
     csrc: []
   },
   payload: Uint8Array.of(seq & 0xff)
@@ -201,5 +201,141 @@ describe('discarding after playback started', () => {
     feed(buffer, 3, 4, 5);
     expect(pullAll(buffer, 2)).toEqual([4, 5]);
     expect(buffer.stats.lost).toBe(0);
+  });
+});
+
+/** Plays `ticks` 20 ms ticks, pushing one packet per tick from `next`, and returns how many ticks produced audio. */
+function audibleTicks(buffer: JitterBuffer, ticks: number, next: (tick: number) => RtpPacket): number {
+  let audible = 0;
+  for (let tick = 0; tick < ticks; tick += 1) {
+    buffer.push(next(tick));
+    if (buffer.pull() !== undefined) audible += 1;
+  }
+  return audible;
+}
+
+describe('stream re-base (new SSRC)', () => {
+  const established = (): JitterBuffer => {
+    const buffer = createJitterBuffer();
+    audibleTicks(buffer, 1000, (tick) => pkt(1000 + tick, 1));
+    return buffer;
+  };
+
+  it('REPRODUCTION: plays promptly when a new SSRC starts 900 sequence numbers behind the cursor', () => {
+    const buffer = established();
+    const audible = audibleTicks(buffer, 100, (tick) => pkt(100 + tick, 2));
+    // Before the fix this was 0 for 18 seconds (900 ticks); with it, only the re-prebuffer gap is silent.
+    expect(audible).toBeGreaterThan(90);
+  });
+
+  it('plays promptly when the new SSRC starts about 30000 behind the cursor', () => {
+    const buffer = established();
+    const audible = audibleTicks(buffer, 100, (tick) => pkt(1000 + tick - 30_000 + 65_536, 2));
+    expect(audible).toBeGreaterThan(90);
+  });
+
+  it('plays promptly when the new SSRC starts far ahead of the cursor', () => {
+    const buffer = established();
+    const audible = audibleTicks(buffer, 100, (tick) => pkt(5000 + tick, 2));
+    expect(audible).toBeGreaterThan(90);
+  });
+
+  it('plays the new stream in order, without the old one leaking in, and counts the resync', () => {
+    const buffer = established();
+    buffer.push(pkt(50, 2));
+    buffer.push(pkt(51, 2));
+    buffer.push(pkt(52, 2));
+    expect(buffer.resyncs).toBe(1);
+    expect(pullAll(buffer, 3)).toEqual([50, 51, 52]);
+  });
+
+  it('does not resync on a single packet of another SSRC (a stray cannot hijack playback)', () => {
+    const buffer = established();
+    buffer.push(pkt(50, 2));
+    expect(buffer.resyncs).toBe(0);
+    buffer.push(pkt(2000, 1));
+    buffer.push(pkt(2001, 1));
+    buffer.push(pkt(2002, 1));
+    expect(buffer.resyncs).toBe(0);
+    expect(pullAll(buffer, 5)).toEqual([1998, 1999, 2000, 2001, 2002]);
+  });
+
+  it('needs two strays from the same SSRC and consecutive in sequence', () => {
+    const buffer = established();
+    buffer.push(pkt(50, 2));
+    buffer.push(pkt(52, 2));
+    buffer.push(pkt(53, 3));
+    expect(buffer.resyncs).toBe(0);
+    buffer.push(pkt(54, 3));
+    expect(buffer.resyncs).toBe(1);
+  });
+
+  it('resyncs on an SSRC change even when the new sequence numbers sit right next to the old ones', () => {
+    const buffer = established();
+    buffer.push(pkt(2000, 2));
+    expect(buffer.resyncs).toBe(0);
+    buffer.push(pkt(2001, 2));
+    expect(buffer.resyncs).toBe(1);
+    expect(buffer.depth).toBe(2);
+  });
+
+  it('forgets a lone stray as soon as the real stream is heard again', () => {
+    const buffer = established();
+    buffer.push(pkt(50, 2));
+    buffer.push(pkt(2000, 1));
+    buffer.push(pkt(51, 2));
+    expect(buffer.resyncs).toBe(0);
+  });
+
+  it('accepts the very first packet of any SSRC', () => {
+    const buffer = createJitterBuffer();
+    feed(buffer, 7);
+    expect(buffer.depth).toBe(1);
+    expect(buffer.resyncs).toBe(0);
+  });
+});
+
+describe('sequence jump within one SSRC', () => {
+  const jumpBy = (offset: number): JitterBuffer => {
+    const buffer = createJitterBuffer();
+    feed(buffer, 1000, 1001, 1002);
+    pullAll(buffer, 3);
+    buffer.push(pkt(1002 + offset));
+    buffer.push(pkt(1003 + offset));
+    return buffer;
+  };
+
+  it('exposes the threshold as 100 packets (2 s at 20 ms)', () => {
+    expect(SEQUENCE_JUMP_THRESHOLD).toBe(100);
+  });
+
+  it('treats a forward jump of exactly the threshold as loss, not a restart', () => {
+    expect(jumpBy(SEQUENCE_JUMP_THRESHOLD).resyncs).toBe(0);
+  });
+
+  it('treats a forward jump one beyond the threshold as a restart', () => {
+    expect(jumpBy(SEQUENCE_JUMP_THRESHOLD + 1).resyncs).toBe(1);
+  });
+
+  it('treats a backward jump of exactly the threshold as stale, not a restart', () => {
+    expect(jumpBy(-SEQUENCE_JUMP_THRESHOLD).resyncs).toBe(0);
+  });
+
+  it('treats a backward jump one beyond the threshold as a restart', () => {
+    expect(jumpBy(-SEQUENCE_JUMP_THRESHOLD - 1).resyncs).toBe(1);
+  });
+
+  it('plays promptly after a large forward jump instead of stalling', () => {
+    const buffer = createJitterBuffer();
+    audibleTicks(buffer, 200, (tick) => pkt(tick));
+    expect(audibleTicks(buffer, 60, (tick) => pkt(5000 + tick))).toBeGreaterThan(50);
+  });
+
+  it('measures the jump across the 16-bit wrap', () => {
+    const buffer = createJitterBuffer();
+    feed(buffer, 65_530, 65_531, 65_532);
+    pullAll(buffer, 3);
+    feed(buffer, 60, 61);
+    expect(buffer.resyncs).toBe(0);
   });
 });

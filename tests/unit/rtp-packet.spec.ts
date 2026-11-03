@@ -8,6 +8,23 @@ import {
   sequenceDelta
 } from '../../src/core/rtp/packet';
 import type { RtpHeader, RtpPacket } from '../../src/core/rtp/packet';
+import {
+  LATCH_CONFIRMATIONS,
+  WATCHDOG_START,
+  latchObserve,
+  latchStart,
+  latchTick,
+  timeoutTicks,
+  watchdogHeard,
+  watchdogTick
+} from '../../src/core/rtp/flow';
+import type { LatchState } from '../../src/core/rtp/flow';
+import {
+  MAX_PAYLOAD_BYTES,
+  PAYLOAD_GRANULE_BYTES,
+  createFrameAssembler,
+  isPlayablePayload
+} from '../../src/core/rtp/playout';
 
 const header = (overrides: Partial<RtpHeader> = {}): RtpHeader => ({
   version: 2,
@@ -176,5 +193,146 @@ describe('wrap arithmetic', () => {
     expect(sequenceDelta(32768, 0)).toBe(-32768);
     expect(sequenceDelta(0, 32768)).toBe(-32768);
     expect(sequenceDelta(0, 32767)).toBe(-32767);
+  });
+});
+
+/* ---------------------------------------------- payload framing and flow rules */
+
+describe('isPlayablePayload', () => {
+  it.each([80, 160, 240, 320, 960])('accepts %i bytes', (bytes) => expect(isPlayablePayload(bytes)).toBe(true));
+  it.each([0, 1, 79, 81, 100, 159, 161, 1040])('rejects %i bytes', (bytes) => expect(isPlayablePayload(bytes)).toBe(false));
+  it('rejects one granule above the maximum and accepts the maximum', () => {
+    expect(isPlayablePayload(MAX_PAYLOAD_BYTES)).toBe(true);
+    expect(isPlayablePayload(MAX_PAYLOAD_BYTES + PAYLOAD_GRANULE_BYTES)).toBe(false);
+    expect(isPlayablePayload(PAYLOAD_GRANULE_BYTES - 1)).toBe(false);
+  });
+});
+
+describe('createFrameAssembler', () => {
+  const ramp = (n: number, from = 1): Int16Array => Int16Array.from({ length: n }, (_, i) => from + i);
+
+  it('starts hungry and is fed by 10 ms packets two at a time', () => {
+    const assembler = createFrameAssembler();
+    expect(assembler.hungry).toBe(true);
+    assembler.append(ramp(80));
+    expect(assembler.hungry).toBe(true);
+    assembler.append(ramp(80, 81));
+    expect(assembler.hungry).toBe(false);
+    expect([...assembler.take()]).toEqual([...ramp(160)]);
+    expect(assembler.hungry).toBe(true);
+  });
+
+  it('splits a 40 ms packet across two takes without pulling again', () => {
+    const assembler = createFrameAssembler();
+    assembler.append(ramp(320));
+    expect([...assembler.take()]).toEqual([...ramp(160)]);
+    expect(assembler.hungry).toBe(false);
+    expect([...assembler.take()]).toEqual([...ramp(160, 161)]);
+  });
+
+  it('pads a short queue with silence', () => {
+    const assembler = createFrameAssembler();
+    assembler.append(ramp(100));
+    const frame = assembler.take();
+    expect(frame).toHaveLength(160);
+    expect([...frame.subarray(0, 100)]).toEqual([...ramp(100)]);
+    expect(frame.subarray(100).every((v) => v === 0)).toBe(true);
+  });
+
+  it('conceals a gap with 20 ms until a packet size is known, then with that size', () => {
+    const assembler = createFrameAssembler();
+    assembler.conceal();
+    expect(assembler.hungry).toBe(false);
+    assembler.take();
+    assembler.append(ramp(320));
+    assembler.take();
+    assembler.take();
+    assembler.conceal();
+    expect(assembler.take().every((v) => v === 0)).toBe(true);
+    expect(assembler.hungry).toBe(false);
+    assembler.take();
+    expect(assembler.hungry).toBe(true);
+  });
+});
+
+describe('watchdog', () => {
+  it('converts a timeout to ticks, rounding up and never below one', () => {
+    expect(timeoutTicks(30_000)).toBe(1500);
+    expect(timeoutTicks(21)).toBe(2);
+    expect(timeoutTicks(20)).toBe(1);
+    expect(timeoutTicks(0)).toBe(1);
+  });
+
+  it('raises stalled exactly on the limit tick, once', () => {
+    let step = watchdogTick(WATCHDOG_START, 3);
+    step = watchdogTick(step.state, 3);
+    expect(step.event).toBeUndefined();
+    step = watchdogTick(step.state, 3);
+    expect(step.event).toBe('stalled');
+    expect(watchdogTick(step.state, 3).event).toBeUndefined();
+  });
+
+  it('raises resumed only after an alarm', () => {
+    expect(watchdogHeard(WATCHDOG_START)).toEqual({ state: WATCHDOG_START });
+    const alarmed = { quiet: 9, alarmed: true };
+    expect(watchdogHeard(alarmed)).toEqual({ state: WATCHDOG_START, event: 'resumed' });
+  });
+});
+
+describe('latching', () => {
+  const target = { host: '10.0.0.1', port: 4000 };
+  const nat = { host: '203.0.113.5', port: 51_000 };
+  const see = (state: LatchState, source = nat, sequence = 0, ssrc = 1): LatchState =>
+    latchObserve(state, { source, ssrc, sequence });
+  const run = (state: LatchState, count: number, from = 0): LatchState => {
+    let next = state;
+    for (let i = 0; i < count; i += 1) next = see(next, nat, (from + i) & 0xffff);
+    return next;
+  };
+
+  it('latches at LATCH_CONFIRMATIONS and not before', () => {
+    expect(run(latchStart(target), LATCH_CONFIRMATIONS - 1).target).toEqual(target);
+    const latched = run(latchStart(target), LATCH_CONFIRMATIONS);
+    expect(latched.target).toEqual(nat);
+    expect(latched.settled).toBe(true);
+  });
+
+  it('counts sequence numbers across the 16-bit wrap', () => {
+    expect(run(latchStart(target), LATCH_CONFIRMATIONS, 65_533).target).toEqual(nat);
+  });
+
+  it('settles on the first packet from the advertised address and then never moves', () => {
+    const settled = see(latchStart(target), target);
+    expect(settled.settled).toBe(true);
+    expect(run(settled, 50).target).toEqual(target);
+  });
+
+  it('distinguishes host from port', () => {
+    const samePort = { host: '203.0.113.5', port: 4000 };
+    const sameHost = { host: '10.0.0.1', port: 4001 };
+    expect(see(latchStart(target), samePort).settled).toBe(false);
+    expect(see(latchStart(target), sameHost).settled).toBe(false);
+  });
+
+  it('restarts the count for a different source, SSRC, or a non-consecutive sequence', () => {
+    const base = run(latchStart(target), 3);
+    expect(see(base, { ...nat, port: nat.port + 1 }, 3).candidate?.count).toBe(1);
+    expect(see(base, nat, 3, 2).candidate?.count).toBe(1);
+    expect(see(base, nat, 4).candidate?.count).toBe(1);
+    expect(see(base, nat, 3).candidate?.count).toBe(4);
+  });
+
+  it('closes the window after windowTicks and ignores later packets', () => {
+    let state = latchStart(target);
+    state = latchTick(state, 3);
+    state = latchTick(state, 3);
+    expect(state.settled).toBe(false);
+    state = latchTick(state, 3);
+    expect(state.settled).toBe(true);
+    expect(run(state, 20).target).toEqual(target);
+  });
+
+  it('keeps a settled state settled as time passes', () => {
+    expect(latchTick({ target, settled: true, age: 0 }, 99).settled).toBe(true);
   });
 });

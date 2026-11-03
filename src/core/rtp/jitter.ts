@@ -22,11 +22,27 @@ export interface JitterBuffer {
   pull(): RtpPacket | undefined;
   readonly stats: JitterStats;
   readonly depth: number;
+  /** How many times the buffer abandoned a stream and started over on another (SSRC change or sequence jump). */
+  readonly resyncs: number;
 }
+
+/**
+ * A packet further than this many sequence numbers from the last one accepted
+ * is not reordering but a different stream (a restart or re-base). 100 is
+ * RFC 3550 appendix A.1's MAX_MISORDER: two seconds at 20 ms, ten times the
+ * deepest queue we keep, so nothing beyond it could ever be played in order.
+ * A genuine loss burst of more than 100 packets resyncs too, which costs no
+ * more than the silence it would have played anyway.
+ */
+export const SEQUENCE_JUMP_THRESHOLD = 100;
 
 const DEFAULTS: JitterOptions = { targetDepth: 3, maxDepth: 10 };
 
 const seqOf = (packet: RtpPacket): number => packet.header.sequenceNumber;
+
+/** A new stream is believed once two consecutive packets of one SSRC have been seen (RFC 3550 A.1's MIN_SEQUENTIAL). */
+const continues = (earlier: RtpPacket, later: RtpPacket): boolean =>
+  earlier.header.ssrc === later.header.ssrc && sequenceDelta(seqOf(later), seqOf(earlier)) === 1;
 
 class Jitter implements JitterBuffer {
   private readonly options: JitterOptions;
@@ -34,6 +50,11 @@ class Jitter implements JitterBuffer {
   /** Sequence number due next; undefined until prebuffering completes. */
   private cursor: number | undefined;
   private counters = { received: 0, played: 0, lost: 0, duplicates: 0, reordered: 0 };
+  /** The last packet accepted into the current stream: the reference for "same stream". */
+  private latest: RtpPacket | undefined;
+  /** A packet that did not belong to the current stream, waiting for a second one to confirm a new stream. */
+  private stray: RtpPacket | undefined;
+  private restarts = 0;
 
   constructor(options: JitterOptions) {
     this.options = options;
@@ -47,8 +68,44 @@ class Jitter implements JitterBuffer {
     return this.queue.length;
   }
 
+  get resyncs(): number {
+    return this.restarts;
+  }
+
   push(packet: RtpPacket): void {
     this.counters.received += 1;
+    const { stray } = this;
+    if (stray !== undefined && continues(stray, packet)) {
+      this.restart();
+      this.admit(stray);
+    } else if (this.isForeign(packet)) {
+      this.stray = packet;
+      return;
+    } else {
+      this.stray = undefined;
+    }
+    this.admit(packet);
+  }
+
+  private isForeign(packet: RtpPacket): boolean {
+    const { latest } = this;
+    if (latest === undefined) return false;
+    return (
+      packet.header.ssrc !== latest.header.ssrc ||
+      Math.abs(sequenceDelta(seqOf(packet), seqOf(latest))) > SEQUENCE_JUMP_THRESHOLD
+    );
+  }
+
+  private restart(): void {
+    this.queue.length = 0;
+    this.cursor = undefined;
+    this.latest = undefined;
+    this.stray = undefined;
+    this.restarts += 1;
+  }
+
+  private admit(packet: RtpPacket): void {
+    this.latest = packet;
     const index = this.slotFor(seqOf(packet));
     if (index < 0) {
       this.counters.duplicates += 1;

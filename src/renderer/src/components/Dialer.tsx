@@ -1,5 +1,5 @@
 import type { AccountId } from '@core/sip';
-import type { AccountView, DialResult } from '../../../shared/api';
+import type { AccountView, CallView, DialResult } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import { useDialer } from '../state/useDialer';
 import type { DialerModel } from '../state/useDialer';
@@ -9,6 +9,7 @@ import { Keypad } from './ui/Keypad';
 
 interface DialerProps {
   readonly accounts: readonly AccountView[];
+  readonly calls: readonly CallView[];
   readonly dial: (accountId: AccountId, target: string) => Promise<DialResult>;
   readonly onDialed: (callId: string) => void;
 }

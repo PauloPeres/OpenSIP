@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { AccountId } from '@core/sip';
-import type { AccountView, DialResult } from '../../../shared/api';
+import { SETUP_IN_PROGRESS_KEY, isOutboundInSetup } from '../../../shared/api';
+import type { AccountView, CallView, DialResult } from '../../../shared/api';
 
 const DIAL_KEY = /^[0-9*#]$/;
 
@@ -25,6 +26,7 @@ function usePhysicalKeys(append: (digit: string) => void, backspace: () => void)
 
 export interface DialerArgs {
   readonly accounts: readonly AccountView[];
+  readonly calls: readonly CallView[];
   readonly dial: (accountId: AccountId, target: string) => Promise<DialResult>;
   readonly onDialed: (callId: string) => void;
 }
@@ -50,9 +52,10 @@ interface SubmitModel {
 }
 
 /** Every refused attempt names its reason, so pressing Call never ends in silence. */
-function refusal(accountId: AccountId | null, target: string): string | null {
+function refusal(accountId: AccountId | null, target: string, calls: readonly CallView[]): string | null {
   if (accountId === null) return 'calls.error.noAccount'; // i18n-exempt: translation key
-  return target.trim() === '' ? 'calls.error.noTarget' : null; // i18n-exempt: translation key
+  if (target.trim() === '') return 'calls.error.noTarget'; // i18n-exempt: translation key
+  return calls.some((view) => isOutboundInSetup(view.call, accountId)) ? SETUP_IN_PROGRESS_KEY : null;
 }
 
 interface Request {
@@ -84,7 +87,7 @@ function useDialSubmit(args: DialerArgs, accountId: AccountId | null, target: st
   useEffect(() => setErrorKey(null), [target, accountId, setErrorKey]);
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    const refused = refusal(accountId, target);
+    const refused = refusal(accountId, target, args.calls);
     setErrorKey(refused);
     if (!busy && refused === null && accountId !== null) place(accountId, target);
   };

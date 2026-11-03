@@ -487,6 +487,7 @@ type FakeSession = {
   onPcm: ReturnType<typeof vi.fn>;
   sendDtmf: ReturnType<typeof vi.fn>;
   setMuted: ReturnType<typeof vi.fn>;
+  setHeld: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   localPort: number;
   stats: { rxPackets: number; txPackets: number; lostPackets: number; muted: boolean };
@@ -555,7 +556,7 @@ function harness(): Harness {
   return { pbx, engine, created, media, diagnostics, clock };
 }
 function fakeSession(): FakeSession {
-  return { sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), close: vi.fn(), localPort: 20000, stats: { rxPackets: 3, txPackets: 4, lostPackets: 1, muted: false } };
+  return { sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), setHeld: vi.fn(), close: vi.fn(), localPort: 20000, stats: { rxPackets: 3, txPackets: 4, lostPackets: 1, muted: false } };
 }
 
 async function registered(h: Harness): Promise<void> {
@@ -786,8 +787,11 @@ describe('engine outbound call', () => {
     expect(await h.engine.dial('nope', '1')).toEqual({ ok: false, errorKey: 'calls.error.notRegistered' });
     await registered(h);
     expect(await h.engine.dial('acc1', '   ')).toEqual({ ok: false, errorKey: 'calls.error.invalidTarget' });
-    h.pbx.respond = () => [];
-    for (let i = 0; i < 4; i += 1) await h.engine.dial('acc1', `10${i}`);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 200, {}, ANSWER)] : []);
+    for (let i = 0; i < 4; i += 1) {
+      await h.engine.dial('acc1', `10${i}`);
+      await settle();
+    }
     expect(await h.engine.dial('acc1', '999')).toEqual({ ok: false, errorKey: 'calls.error.limitReached' });
     await h.engine.stop();
   });
@@ -1283,6 +1287,65 @@ describe('engine inbound call', () => {
   });
 });
 
+
+describe('engine one outbound call in setup per account', () => {
+  const OFFER = ['v=0', 'o=- 1 1 IN IP4 203.0.113.9', 's=-', 'c=IN IP4 203.0.113.9', 't=0 0', 'm=audio 30000 RTP/AVP 0 8 101', 'a=rtpmap:0 PCMU/8000', 'a=rtpmap:101 telephone-event/8000', 'a=sendrecv', ''].join('\r\n');
+  const inviteFrom = (callId: string): SipRequest => ({
+    kind: 'request', method: 'INVITE', uri: 'sip:1000@10.0.0.5',
+    headers: { via: ['SIP/2.0/UDP 203.0.113.9:5060;branch=z9hG4bKy'], from: ['"Bob" <sip:2000@pbx.test>;tag=bobtag'], to: ['<sip:1000@pbx.test>'], 'call-id': [callId], cseq: ['7 INVITE'], contact: ['<sip:2000@203.0.113.9:5060>'] },
+    body: OFFER
+  });
+  const addSecondAccount = async (h: Harness): Promise<void> => {
+    await h.engine.startAccount(createAccount({ displayName: 'Other', username: '3000', password: 'secret', domain: 'pbx.test' }, 'acc2'));
+    await settle(); await settle();
+    expect(h.engine.getRegistrations()['acc2']?.state).toBe('registered');
+  };
+  const silentPbx = (h: Harness): void => {
+    h.pbx.respond = (m) => (m.method === 'REGISTER' ? [reply(m, 200, { expires: ['300'] })] : []);
+  };
+
+  it('refuses a second dial from an account whose first call is still being set up', async () => {
+    const h = harness();
+    await registered(h);
+    silentPbx(h);
+    expect(await h.engine.dial('acc1', '1001')).toMatchObject({ ok: true });
+    const second = await h.engine.dial('acc1', '1002');
+    expect(second).toEqual({ ok: false, errorKey: 'calls.error.setupInProgress' });
+    expect(h.pbx.requests('INVITE')).toHaveLength(1);
+    expect(h.engine.getCallViews()).toHaveLength(1);
+  });
+
+  it('lets a different account dial while the first account is in setup', async () => {
+    const h = harness();
+    await registered(h);
+    await addSecondAccount(h);
+    silentPbx(h);
+    expect(await h.engine.dial('acc1', '1001')).toMatchObject({ ok: true });
+    expect(await h.engine.dial('acc2', '1002')).toMatchObject({ ok: true });
+    expect(h.engine.getCallViews()).toHaveLength(2);
+  });
+
+  it('still receives an inbound call while an outbound call is in setup', async () => {
+    const h = harness();
+    await registered(h);
+    silentPbx(h);
+    await h.engine.dial('acc1', '1001');
+    h.pbx.inject(inviteFrom('in-setup'));
+    await settle();
+    const states = h.engine.getCallViews().map((v) => `${v.call.direction}:${v.call.state}`).sort();
+    expect(states).toEqual(['inbound:ringing', 'outbound:connecting']);
+  });
+
+  it('allows another call from the same account once the first is active', async () => {
+    const h = harness();
+    await registered(h);
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 200, {}, ANSWER)] : []);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    expect(h.engine.getCallViews()[0]?.call.state).toBe('active');
+    expect(await h.engine.dial('acc1', '1002')).toMatchObject({ ok: true });
+  });
+});
 
 describe('UDP connection', () => {
   const candidate = { transport: 'udp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;

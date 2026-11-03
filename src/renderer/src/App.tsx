@@ -68,7 +68,7 @@ function PhoneView({ state, model, now, setupStarts }: Omit<ViewProps, 'view' | 
         <LinesPanel model={model} env={{ accounts: snapshot.accounts, actions, now, setupStarts }} />
       </ErrorBoundary>
       <ErrorBoundary>
-        <Dialer accounts={snapshot.accounts} dial={actions.dial} onDialed={model.focus} />
+        <Dialer accounts={snapshot.accounts} calls={snapshot.calls} dial={actions.dial} onDialed={model.focus} />
       </ErrorBoundary>
     </div>
   );

@@ -1,10 +1,21 @@
 import { createSocket } from 'node:dgram';
 import { randomInt } from 'node:crypto';
 import {
+  INBOUND_TIMEOUT_MS,
+  LATCH_WINDOW_MS,
   PCMA_PAYLOAD_TYPE,
   PCMU_PAYLOAD_TYPE,
   SAMPLES_PER_FRAME,
+  WATCHDOG_START,
+  createFrameAssembler,
   createJitterBuffer,
+  isPlayablePayload,
+  latchObserve,
+  latchStart,
+  latchTick,
+  timeoutTicks,
+  watchdogHeard,
+  watchdogTick,
   decodeALaw,
   decodeMuLaw,
   decodeRtp,
@@ -14,7 +25,7 @@ import {
   nextSequence,
   nextTimestamp
 } from '@core/rtp';
-import type { RtpPacket } from '@core/rtp';
+import type { Endpoint, LatchState, RtpPacket, WatchdogEvent, WatchdogState } from '@core/rtp';
 import { DTMF_DIGITS, isDtmfDigit } from '../../shared/api';
 import type { MediaStats } from '../../shared/api';
 
@@ -27,6 +38,8 @@ export interface RtpSessionOptions {
   /** The peer's telephone-event payload type (101 by convention); absent when not offered. */
   readonly dtmfPayloadType?: number;
   readonly ssrc?: number;
+  /** No inbound RTP packet for this long reports the stream as stalled. Default INBOUND_TIMEOUT_MS. */
+  readonly inboundTimeoutMs?: number;
 }
 
 export interface RtpSession {
@@ -38,6 +51,8 @@ export interface RtpSession {
   sendDtmf(digit: string): void;
   /** Muted still SENDS, as silence, to keep the NAT binding and the far end's stream alive. */
   setMuted(muted: boolean): void;
+  /** On hold the far end may legitimately stop sending, so the inactivity watchdog pauses. */
+  setHeld(held: boolean): void;
   readonly stats: MediaStats;
   readonly localPort: number;
   close(): void;
@@ -45,7 +60,8 @@ export interface RtpSession {
 
 export interface RtpSocket {
   send(data: Uint8Array, port: number, host: string): void;
-  onMessage(listener: (data: Uint8Array) => void): void;
+  /** `from` is the datagram's source address, which symmetric RTP needs. */
+  onMessage(listener: (data: Uint8Array, from: Endpoint) => void): void;
   close(): void;
 }
 
@@ -60,6 +76,8 @@ export interface RtpDeps {
   /** An unsigned 32-bit random number. */
   readonly random: () => number;
   readonly onError?: (error: unknown) => void;
+  /** Things worth a line in the log: a stalled stream, an unusable packet size, a latch. */
+  readonly onNotice?: (level: 'info' | 'warn', message: string) => void;
 }
 
 /* ------------------------------------------------------------------ codecs */
@@ -182,6 +200,63 @@ function eventPayload(code: number, step: number): Uint8Array {
   return Uint8Array.of(code, flags, duration >> 8, duration & 0xff);
 }
 
+/* ------------------------------------------------------------- flow health */
+
+type Notify = (level: 'info' | 'warn', message: string) => void;
+
+const at = (endpoint: Endpoint): string => `${endpoint.host}:${endpoint.port}`;
+
+/** Applies the pure watchdog and latching decisions to what the session observes. */
+class FlowMonitor {
+  private latch: LatchState;
+  private dog: WatchdogState = WATCHDOG_START;
+  private held = false;
+  private readonly limit: number;
+  private readonly windowTicks = timeoutTicks(LATCH_WINDOW_MS);
+  private readonly notify: Notify;
+  private readonly timeoutMs: number;
+
+  constructor(advertised: Endpoint, timeoutMs: number, notify: Notify) {
+    this.latch = latchStart(advertised);
+    this.timeoutMs = timeoutMs;
+    this.limit = timeoutTicks(timeoutMs);
+    this.notify = notify;
+  }
+
+  get target(): Endpoint {
+    return this.latch.target;
+  }
+
+  setHeld(held: boolean): void {
+    this.held = held;
+    this.dog = WATCHDOG_START;
+  }
+
+  tick(): void {
+    this.latch = latchTick(this.latch, this.windowTicks);
+    if (!this.held) this.report(watchdogTick(this.dog, this.limit));
+  }
+
+  /** Any RTP packet at all counts as life, whatever it carries. */
+  heard(): void {
+    this.report(watchdogHeard(this.dog));
+  }
+
+  /** A media packet (negotiated voice or telephone-event) from `source`. */
+  observe(packet: RtpPacket, source: Endpoint): void {
+    const before = this.latch.target;
+    const { ssrc, sequenceNumber } = packet.header;
+    this.latch = latchObserve(this.latch, { source, ssrc, sequence: sequenceNumber });
+    if (this.latch.target !== before) this.notify('info', `rtp: latched media to ${at(source)}, SDP said ${at(before)}`);
+  }
+
+  private report(step: { readonly state: WatchdogState; readonly event?: WatchdogEvent }): void {
+    this.dog = step.state;
+    if (step.event === 'stalled') this.notify('warn', `rtp: no inbound packets for ${this.timeoutMs / 1000}s, the call may be dead`);
+    if (step.event === 'resumed') this.notify('info', 'rtp: inbound packets resumed');
+  }
+}
+
 /* ------------------------------------------------------------------- session */
 
 class Session implements RtpSession {
@@ -194,6 +269,9 @@ class Session implements RtpSession {
   private readonly stream: OutboundStream;
   private readonly queue: number[] = [];
   private readonly stopTimer: () => void;
+  private readonly playout = createFrameAssembler();
+  private readonly flow: FlowMonitor;
+  private oddSizeReported = false;
   private active: ActiveEvent | undefined;
   private resting = false;
   private muted = false;
@@ -206,7 +284,10 @@ class Session implements RtpSession {
     this.codec = codecFor(options.payloadType);
     const { random } = deps;
     this.stream = new OutboundStream(options.ssrc ?? random(), random() & 0xffff, random() >>> 0);
-    deps.socket.onMessage((data) => this.onDatagram(data));
+    const notify: Notify = (level, message) => deps.onNotice?.(level, message);
+    const advertised = { host: options.remoteHost, port: options.remotePort };
+    this.flow = new FlowMonitor(advertised, options.inboundTimeoutMs ?? INBOUND_TIMEOUT_MS, notify);
+    deps.socket.onMessage((data, from) => this.onDatagram(data, from));
     this.stopTimer = deps.timer.every(PTIME_MS, () => this.onTick());
   }
 
@@ -217,6 +298,10 @@ class Session implements RtpSession {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
+  }
+
+  setHeld(held: boolean): void {
+    this.flow.setHeld(held);
   }
 
   onPcm(listener: (samples: Int16Array) => void): () => void {
@@ -249,19 +334,22 @@ class Session implements RtpSession {
 
   private transmit(data: Uint8Array): void {
     try {
-      this.deps.socket.send(data, this.options.remotePort, this.options.remoteHost);
+      const { host, port } = this.flow.target;
+      this.deps.socket.send(data, port, host);
     } catch (error) {
       this.deps.onError?.(error);
     }
   }
 
-  private onDatagram(data: Uint8Array): void {
+  private onDatagram(data: Uint8Array, from: Endpoint): void {
     if (this.closed) return;
     const packet = parseInbound(data);
     if (packet === undefined) return;
+    this.flow.heard();
     const type = packet.header.payloadType;
-    if (type === this.options.payloadType) this.accept(packet);
-    else if (type === this.options.dtmfPayloadType) this.accept(this.silentStandIn(packet));
+    if (type !== this.options.payloadType && type !== this.options.dtmfPayloadType) return;
+    this.flow.observe(packet, from);
+    this.accept(type === this.options.payloadType ? packet : this.silentStandIn(packet));
   }
 
   /**
@@ -274,14 +362,32 @@ class Session implements RtpSession {
   }
 
   private accept(packet: RtpPacket): void {
-    if (packet.payload.length === SAMPLES_PER_FRAME) this.jitter.push(packet);
+    if (isPlayablePayload(packet.payload.length)) this.jitter.push(packet);
+    else this.reportOddSize(packet.payload.length);
+  }
+
+  /** Once per session: at 50 packets a second a per-packet line would flood the log. */
+  private reportOddSize(bytes: number): void {
+    if (this.oddSizeReported) return;
+    this.oddSizeReported = true;
+    this.deps.onNotice?.('warn', `rtp: dropping packets with a ${bytes}-byte payload, not a whole number of 10 ms G.711 slices`);
   }
 
   private onTick(): void {
     if (this.closed) return;
+    this.flow.tick();
     this.stepEvent();
-    const packet = this.jitter.pull();
-    this.deliver(packet === undefined ? silence() : this.codec.decode(packet.payload));
+    this.deliver(this.nextFrame());
+  }
+
+  /** Playback wants 20 ms a tick whatever the peer's packet size; pull packets only as samples run out. */
+  private nextFrame(): Int16Array {
+    while (this.playout.hungry) {
+      const packet = this.jitter.pull();
+      if (packet === undefined) this.playout.conceal();
+      else this.playout.append(this.codec.decode(packet.payload));
+    }
+    return this.playout.take();
   }
 
   private deliver(frame: Int16Array): void {
@@ -326,6 +432,8 @@ class Session implements RtpSession {
 
 /* ----------------------------------------------------------------- real I/O */
 
+const bytesOf = (message: Buffer): Uint8Array => new Uint8Array(message.buffer, message.byteOffset, message.length);
+
 function createUdpSocket(localPort: number, onError: RtpDeps['onError']): RtpSocket {
   const socket = createSocket('udp4');
   socket.on('error', (error) => onError?.(error));
@@ -336,7 +444,7 @@ function createUdpSocket(localPort: number, onError: RtpDeps['onError']): RtpSoc
         if (error !== null) onError?.(error);
       }),
     onMessage: (listener) =>
-      void socket.on('message', (message) => listener(new Uint8Array(message.buffer, message.byteOffset, message.length))),
+      void socket.on('message', (message, from) => listener(bytesOf(message), { host: from.address, port: from.port })),
     close: (): void => {
       try {
         socket.close();
@@ -358,12 +466,13 @@ const intervalTimer: RtpTimer = {
 const randomUint32 = (): number => randomInt(0, 2 ** 32);
 
 export function createRtpSession(options: RtpSessionOptions, deps: Partial<RtpDeps> = {}): RtpSession {
-  const { onError } = deps;
+  const { onError, onNotice } = deps;
   const complete: RtpDeps = {
     socket: deps.socket ?? createUdpSocket(options.localPort, onError),
     timer: deps.timer ?? intervalTimer,
     random: deps.random ?? randomUint32,
-    ...(onError === undefined ? {} : { onError })
+    ...(onError === undefined ? {} : { onError }),
+    ...(onNotice === undefined ? {} : { onNotice })
   };
   return new Session(options, complete);
 }

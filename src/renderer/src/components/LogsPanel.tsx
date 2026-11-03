@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { AppSnapshot } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { TranslationApi } from '../i18n/TranslatorProvider';
+import { getApi } from '../state/api';
+import { copyToClipboard } from '../state/clipboard';
 import { formatClock } from '../state/format';
 import type { AppActions } from '../state/useAppState';
 import { LEVELS, filterLogs, useFlash, useStickyScroll } from '../state/useLogView';
@@ -26,6 +28,8 @@ interface LogControls {
   readonly clear: () => void;
 }
 
+const COPY_FAILED_KEY = 'logs.copyFailed'; // i18n-exempt: translation key
+
 function toPlainText(entries: readonly LogEntry[], { tw }: TranslationApi): string {
   return entries
     .map((e) => `${formatClock(e.at)} ${tw(`logs.level.${e.level}`)} ${tw(e.messageKey, e.params)}${e.raw ? `\n${e.raw}` : ''}`)
@@ -35,11 +39,17 @@ function toPlainText(entries: readonly LogEntry[], { tw }: TranslationApi): stri
 function CopyButton({ entries }: { readonly entries: readonly LogEntry[] }): JSX.Element {
   const api = useTranslation();
   const { t } = api;
-  const [copied, flash] = useFlash(1600);
+  const [copied, flashCopied] = useFlash(1600);
+  const [failed, flashFailed] = useFlash(5000);
   const copy = (): void => {
-    navigator.clipboard.writeText(toPlainText(entries, api)).then(flash).catch(() => undefined);
+    copyToClipboard(getApi(), toPlainText(entries, api)).then((ok) => (ok ? flashCopied() : flashFailed()), flashFailed);
   };
-  return <Button label={copied ? t('logs.copied') : t('logs.copy')} onClick={copy} disabled={entries.length === 0} />;
+  return (
+    <>
+      <Button label={copied ? t('logs.copied') : t('logs.copy')} onClick={copy} disabled={entries.length === 0} />
+      {failed ? <p className="field-error" role="alert">{api.tw(COPY_FAILED_KEY)}</p> : null}
+    </>
+  );
 }
 
 interface FiltersProps {
