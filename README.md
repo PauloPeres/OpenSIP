@@ -15,10 +15,11 @@ Linux, from a single codebase, with automatic updates.
 
 - **Multiple SIP accounts** — register several accounts at the same time and see the
   registration state of each one live.
-- **Answer incoming calls** — ring, answer, reject, hold, resume and hang up, with a
-  configurable limit of concurrent calls.
 - **Place calls** — a dialer with one line per call, verified on a real call with audio
   heard in both directions.
+- **Receive calls** — ring, answer, reject, hold, resume and hang up, with a configurable
+  limit of concurrent calls. The signalling is implemented and tested; taking an incoming
+  call in the app with audio has not been confirmed yet.
 - **Call history and redial** — every finished call is listed with its time, direction
   (incoming or outgoing), the remote number or address, the account that carried it, its
   outcome (answered, missed, declined, cancelled or failed) and, when it connected, how
@@ -61,18 +62,21 @@ If you need to pin one specific path, set the optional server field under **Adva
 
 ### Calls vanish: no ringing, no error, nothing
 
-If registration works and incoming calls arrive, but an outgoing call never progresses and
-the server gives no answer at all — not a rejection, not even a `407` authentication
-challenge — your provider may be filtering on the SIP `User-Agent` header.
+If registration works, but an outgoing call never progresses — the server answers
+`100 Trying` and then nothing: no ringing, no `407` authentication challenge, no
+rejection — your provider may be filtering on the SIP `User-Agent` header.
 
 This is a real-world constraint, not a quirk of one server. Carriers and session border
 controllers commonly accept only clients they recognise, as an anti-fraud measure, and some
 **silently discard** the INVITE of any other client instead of refusing it. A softphone that
 cannot be told what to identify as is unusable behind one.
 
-It was found this way: an OpenSIPS 3.3.10 server never challenged an INVITE that carried
-Open SIP Phone's default `User-Agent` (`OpenSIPPhone/0.1.0`). A second, already recognised
-softphone placed the same call from the same machine, and the server answered it with
+It was found this way: an OpenSIPS 3.3.10 server answered an INVITE that carried Open SIP
+Phone's default `User-Agent` (`OpenSIPPhone/0.1.0`) with `100 Trying` twice and then
+nothing, ever — no `180`, no `407`, no final response, not even a reply to our CANCEL. The
+two `100`s show the request was accepted and a transaction created, so this is not a packet
+lost on the network: the server simply never produced a final answer. A second, already
+recognised softphone placed the same call from the same machine, and the server answered it with
 `407 Proxy Authentication Required`; the call then rang and connected. Everything else in
 the two requests was equivalent, so the header was the difference.
 
@@ -136,7 +140,9 @@ OPENSIP_ACCOUNT_1_REGISTER_EXPIRES=600
 Up to nine accounts (`OPENSIP_ACCOUNT_1_*` … `OPENSIP_ACCOUNT_9_*`) are read. An entry
 is only seeded when `USERNAME`, `PASSWORD` and `DOMAIN` are filled in, so gaps and
 half-filled blocks are simply skipped. `SERVER_URI` is optional — leave it empty for
-automatic discovery; the legacy `WS_SERVER` name is still accepted. Seeding happens **only in
+automatic discovery; the legacy `WS_SERVER` name is still accepted. A separate, optional
+`OPENSIP_USER_AGENT` is the initial value of the SIP User-Agent setting until you choose
+one in **Settings**. Seeding happens **only in
 development** (`!app.isPackaged`) and **only when no account is stored yet**; packaged
 builds ignore the file entirely.
 
@@ -151,13 +157,15 @@ npm run dist
 ```
 src/core/      pure, framework-free domain — no Electron, no DOM, 100% unit tested
   i18n/        translator + en/pt-BR dictionaries
+  history/     call history: journal, outcomes, retention cap and redial rules
   sip/         account validation, account store, registration and call state
                machines, transport discovery, SIP wire codec and digest auth
   rtp/         G.711 codecs, RTP packets, jitter buffer
   diagnostics/ diagnostics log and credential redaction
   config/      development account seeding from the environment
 src/main/      Electron main process: windows, IPC, storage, auto-update
-  sip/         native SIP stack: transport prober, sockets, registration and calls
+  sip/         native SIP stack: transport prober, sockets, registration and calls,
+               and the User-Agent setting (user-agent.ts)
   media/       RTP session and the hidden audio window (microphone and speaker)
 src/preload/   contextBridge surface — the only path between renderer and main
 src/renderer/  React UI; every string goes through t()
@@ -176,7 +184,7 @@ which is why the whole protocol can be tested exhaustively without a PBX.
 | Multiple accounts, validation, persistence | working |
 | Automatic transport discovery (SRV + probe) | working |
 | Registration over TCP, TLS, UDP, WS, WSS | working |
-| Incoming call signalling: ring, answer, reject, hang up | working |
+| Incoming call signalling: ring, answer, reject, hang up | implemented; inbound INVITEs were received and answered with `180` in a test harness, but no incoming call has been taken in the app with audio |
 | Placing calls: dialer, one line per call | working — an outbound call connected on a real account |
 | Call history and redial | working, unit-tested; not yet exercised end to end on a real call |
 | Per-account on/off switch | working |

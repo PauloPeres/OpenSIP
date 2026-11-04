@@ -16,10 +16,11 @@ automática.
 
 - **Múltiplas contas SIP** — registre várias contas ao mesmo tempo e veja o estado de
   registro de cada uma em tempo real.
-- **Atendimento de chamadas** — tocar, atender, rejeitar, colocar em espera, retomar e
-  encerrar, com limite configurável de chamadas simultâneas.
 - **Fazer chamadas** — um discador com uma linha por chamada, verificado em uma chamada
   real com áudio ouvido nos dois sentidos.
+- **Receber chamadas** — tocar, atender, rejeitar, colocar em espera, retomar e encerrar,
+  com limite configurável de chamadas simultâneas. A sinalização está implementada e
+  testada; atender uma chamada recebida no app, com áudio, ainda não foi confirmado.
 - **Histórico de chamadas e rediscagem** — toda chamada encerrada é listada com o horário,
   a direção (recebida ou feita), o número ou endereço remoto, a conta que a transportou, o
   resultado (atendida, perdida, recusada, cancelada ou falhou) e, quando completou, a
@@ -66,9 +67,9 @@ Se precisar fixar um caminho específico, preencha o campo opcional de servidor 
 
 ### As chamadas somem: sem toque, sem erro, sem nada
 
-Se o registro funciona e as chamadas recebidas chegam, mas uma chamada de saída nunca
-avança e o servidor não dá resposta alguma — nem uma recusa, nem sequer um desafio de
-autenticação `407` — o seu provedor pode estar filtrando pelo cabeçalho SIP `User-Agent`.
+Se o registro funciona, mas uma chamada de saída nunca avança — o servidor responde
+`100 Trying` e depois nada: sem toque, sem desafio de autenticação `407`, sem recusa — o
+seu provedor pode estar filtrando pelo cabeçalho SIP `User-Agent`.
 
 Esta é uma restrição do mundo real, não uma peculiaridade de um servidor. Operadoras e
 controladores de borda de sessão costumam aceitar apenas clientes que reconhecem, como
@@ -76,9 +77,12 @@ medida antifraude, e alguns **descartam em silêncio** o INVITE de qualquer outr
 em vez de recusá-lo. Um softphone que não pode ser instruído sobre como se identificar fica
 inutilizável atrás de um deles.
 
-Foi descoberto assim: um servidor OpenSIPS 3.3.10 nunca desafiou um INVITE que levava o
-`User-Agent` padrão do Open SIP Phone (`OpenSIPPhone/0.1.0`). Um segundo softphone, já
-reconhecido, fez a mesma chamada a partir da mesma máquina, e o servidor o respondeu com
+Foi descoberto assim: um servidor OpenSIPS 3.3.10 respondeu a um INVITE que levava o
+`User-Agent` padrão do Open SIP Phone (`OpenSIPPhone/0.1.0`) com `100 Trying` duas vezes e
+depois nada, nunca — sem `180`, sem `407`, sem resposta final, nem mesmo uma resposta ao
+nosso CANCEL. Os dois `100` mostram que a requisição foi aceita e que uma transação foi
+criada, então não se trata de um pacote perdido na rede: o servidor simplesmente nunca
+produziu uma resposta final. Um segundo softphone, já reconhecido, fez a mesma chamada a partir da mesma máquina, e o servidor o respondeu com
 `407 Proxy Authentication Required`; a chamada então tocou e completou. Todo o resto das
 duas requisições era equivalente, então o cabeçalho era a diferença.
 
@@ -143,7 +147,9 @@ OPENSIP_ACCOUNT_1_REGISTER_EXPIRES=600
 São lidas até nove contas (`OPENSIP_ACCOUNT_1_*` … `OPENSIP_ACCOUNT_9_*`). Uma entrada
 só é carregada quando `USERNAME`, `PASSWORD` e `DOMAIN` estão preenchidos, então
 blocos vazios ou pela metade são simplesmente ignorados. O `SERVER_URI` é opcional —
-deixe vazio para descoberta automática; o nome antigo `WS_SERVER` continua aceito. A carga
+deixe vazio para descoberta automática; o nome antigo `WS_SERVER` continua aceito. Uma
+variável à parte, opcional, `OPENSIP_USER_AGENT`, é o valor inicial da configuração de
+User-Agent SIP até você escolher um em **Configurações**. A carga das contas
 acontece **somente em desenvolvimento** (`!app.isPackaged`) e **somente quando nenhuma
 conta foi salva ainda**; builds empacotados ignoram o arquivo por completo.
 
@@ -158,6 +164,7 @@ npm run dist
 ```
 src/core/      domínio puro, sem framework — sem Electron, sem DOM, 100% testado
   i18n/        tradutor + dicionários en/pt-BR
+  history/     histórico de chamadas: journal, resultados, teto de retenção e regras de rediscagem
   sip/         validação de conta, repositório de contas, máquinas de estado de
                registro e de chamada, descoberta de transporte, codec SIP e
                autenticação digest
@@ -166,7 +173,8 @@ src/core/      domínio puro, sem framework — sem Electron, sem DOM, 100% test
   config/      carga de contas de desenvolvimento a partir do ambiente
 src/main/      processo principal do Electron: janelas, IPC, armazenamento,
                atualização automática
-  sip/         pilha SIP nativa: sonda de transporte, sockets, registro e chamadas
+  sip/         pilha SIP nativa: sonda de transporte, sockets, registro e chamadas,
+               e a configuração do User-Agent (user-agent.ts)
   media/       sessão RTP e a janela de áudio oculta (microfone e alto-falante)
 src/preload/   superfície do contextBridge — o único caminho entre renderer e main
 src/renderer/  UI em React; todo texto passa por t()
@@ -185,7 +193,7 @@ do núcleo — e é por isso que o protocolo inteiro pode ser testado sem nenhum
 | Múltiplas contas, validação, persistência | funcionando |
 | Descoberta automática de transporte (SRV + sonda) | funcionando |
 | Registro sobre TCP, TLS, UDP, WS, WSS | funcionando |
-| Sinalização de chamada recebida: tocar, atender, rejeitar, encerrar | funcionando |
+| Sinalização de chamada recebida: tocar, atender, rejeitar, encerrar | implementada; INVITEs recebidos foram atendidos com `180` em um ambiente de teste, mas nenhuma chamada recebida foi atendida no app com áudio |
 | Fazer chamadas: discador, uma linha por chamada | funcionando — uma chamada de saída completou em uma conta real |
 | Histórico de chamadas e rediscagem | funcionando, testado por unidade; ainda não exercitado de ponta a ponta em uma chamada real |
 | Liga/desliga por conta | funcionando |

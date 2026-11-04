@@ -36,12 +36,12 @@ all met, and this document does not round them up.
 
 | Area | State |
 | --- | --- |
-| Multi-account registration over automatically discovered transport (SRV, then the default port ladder, probing TLS, WSS, TCP, WS, UDP in that order) | **Working**, verified against a live OpenSIPS 3.3.10 |
+| Registration over automatically discovered transport (SRV, then the default port ladder, probing TLS, WSS, TCP, WS, UDP in that order) | **Working**, verified against a live OpenSIPS 3.3.10. Two accounts registering at the same time were only tried in a throwaway test harness (3 November), not in the app — see exit criterion 3 |
 | Digest authentication, including retry when the server re-challenges with a new nonce | **Working**, verified live |
 | NAT handling: `rport`, with the learned public address used in `Contact` | **Working**, verified live |
 | Per-account on/off switching | **Working**, verified live |
 | Diagnostics log that redacts credentials | **Working** |
-| Two-way RTP audio: G.711 µ-law and A-law, jitter buffer, DTMF (RFC 4733), mute, hold and resume | **Verified on a real outbound call, heard in both directions.** Also unit-tested, and a UDP loopback test carried audio both ways with zero loss. Not separately confirmed: audio on an *incoming* call, DTMF, hold and resume on a real call |
+| Two-way RTP audio: G.711 µ-law and A-law, jitter buffer, DTMF (RFC 4733), mute, hold and resume | **Verified on a real outbound call, heard in both directions.** Also unit-tested, and a UDP loopback test carried audio both ways with zero loss |
 | Outbound call | **Working**: a real call connected. It needs a `User-Agent` the provider recognises and a number with its full prefix — see below |
 | Configurable SIP `User-Agent` | **Working**: **Settings → SIP User-Agent**, persisted, applied to the next message sent |
 | Call history and redial | **Delivered** — see Phase 1 |
@@ -51,14 +51,17 @@ all met, and this document does not round them up.
 
 #### The outbound-call blocker: resolved, and the cause was the User-Agent
 
-Outbound calls never completed. The INVITE went out and the call never got further: no
-ringing, no error, no failure. This affected an external number and an internal extension
-alike, while registration and incoming calls worked.
+Outbound calls never completed. The INVITE went out, the server answered `100 Trying`
+twice, and then nothing: no ringing, no `180`, no error, no final response. This affected an
+external number and an internal extension alike, while registration worked.
 
 **The cause was the SIP `User-Agent`, and the server was discarding the request.** The
 owner's OpenSIPS 3.3.10 **silently discards INVITEs from a User-Agent it does not
-recognise**: no `407`, no error, nothing at all. With `OpenSIPPhone/0.1.0` the server never
-challenged. With the `User-Agent` of a softphone it recognises, it answered `407 Proxy
+recognise**: no `407`, no error, no final response. With `OpenSIPPhone/0.1.0` it answered
+`100 Trying` twice and then nothing, ever — not even a reply to our CANCEL. The two `100`s
+prove the request was accepted and a transaction created (the second comes from the
+OpenSIPS `tm` module, which only emits it once the transaction exists), so this was not a
+packet lost on the network; the server simply produced no final answer. With the `User-Agent` of a softphone it recognises, it answered `407 Proxy
 Authentication Required`, and the call rang and connected. This was established by capturing
 both clients placing the same call from the same machine; everything else in the request
 was byte-for-byte equivalent.
@@ -98,8 +101,8 @@ The MVP is done when, and only when, all four hold. Today:
 | # | Criterion | State |
 | --- | --- | --- |
 | 1 | A call to an external number is answered and **a person on the far end is heard, and hears the user**, in a real call on at least one account | **Met.** A real outbound call connected, with audio heard in both directions |
-| 2 | An incoming call is answered and carries audio both ways | **Not confirmed.** Incoming call signalling works (ring, answer, reject, hang up); answering a real incoming call and hearing audio both ways has not been separately confirmed |
-| 3 | Two accounts are registered and in use at once, with a call on each | **Not confirmed.** Several accounts register at once, verified live; two simultaneous calls, one on each, have not been separately confirmed |
+| 2 | An incoming call is answered and carries audio both ways | **Not confirmed.** Inbound INVITEs have been received and answered with `180` in a test harness; no incoming call has been taken in the app with audio |
+| 3 | Two accounts are registered and in use at once, with a call on each | **Not confirmed.** Two accounts were registered simultaneously only in a throwaway test harness (3 November), not in the app; two simultaneous calls, one on each, have not been tried |
 | 4 | A first release is published | **Not met.** No release has been published |
 
 So criterion 1 is met, criteria 2 and 3 are unconfirmed rather than failing, and criterion 4
@@ -380,12 +383,12 @@ abaixo, nem todos foram cumpridos, e este documento não os arredonda para cima.
 
 | Área | Estado |
 | --- | --- |
-| Registro de várias contas sobre transporte descoberto automaticamente (SRV, depois a escada de portas padrão, sondando TLS, WSS, TCP, WS e UDP nessa ordem) | **Funcionando**, verificado contra um OpenSIPS 3.3.10 real |
+| Registro sobre transporte descoberto automaticamente (SRV, depois a escada de portas padrão, sondando TLS, WSS, TCP, WS e UDP nessa ordem) | **Funcionando**, verificado contra um OpenSIPS 3.3.10 real. Duas contas registrando ao mesmo tempo foram testadas apenas em um ambiente de teste descartável (3 de novembro), não no app — veja o critério de saída 3 |
 | Autenticação digest, inclusive nova tentativa quando o servidor desafia de novo com outro nonce | **Funcionando**, verificado ao vivo |
 | NAT: `rport`, com o endereço público aprendido usado no `Contact` | **Funcionando**, verificado ao vivo |
 | Liga/desliga por conta | **Funcionando**, verificado ao vivo |
 | Log de diagnóstico que oculta credenciais | **Funcionando** |
-| Áudio RTP bidirecional: G.711 µ-law e A-law, jitter buffer, DTMF (RFC 4733), mudo, espera e retomada | **Verificado em uma chamada de saída real, ouvido nos dois sentidos.** Também testado por unidade, e um teste de loopback UDP levou áudio nos dois sentidos sem perda. Não confirmados separadamente: o áudio em uma chamada *recebida*, DTMF, espera e retomada em uma chamada real |
+| Áudio RTP bidirecional: G.711 µ-law e A-law, jitter buffer, DTMF (RFC 4733), mudo, espera e retomada | **Verificado em uma chamada de saída real, ouvido nos dois sentidos.** Também testado por unidade, e um teste de loopback UDP levou áudio nos dois sentidos sem perda |
 | Chamada de saída | **Funcionando**: uma chamada real completou. Exige um `User-Agent` que o provedor reconheça e um número com o prefixo completo — veja abaixo |
 | `User-Agent` SIP configurável | **Funcionando**: **Configurações → User-Agent SIP**, persistido e aplicado à próxima mensagem enviada |
 | Histórico de chamadas e rediscagem | **Entregue** — veja a Fase 1 |
@@ -395,13 +398,17 @@ abaixo, nem todos foram cumpridos, e este documento não os arredonda para cima.
 
 #### O bloqueio da chamada de saída: resolvido, e a causa era o User-Agent
 
-As chamadas de saída nunca se completavam. O INVITE saía e a chamada não avançava: nem
-toque, nem erro, nem falha. Isso valia tanto para um número externo quanto para um ramal
-interno, enquanto o registro e as chamadas recebidas funcionavam.
+As chamadas de saída nunca se completavam. O INVITE saía, o servidor respondia `100 Trying`
+duas vezes e depois nada: nem toque, nem `180`, nem erro, nem resposta final. Isso valia
+tanto para um número externo quanto para um ramal interno, enquanto o registro funcionava.
 
 **A causa era o `User-Agent` SIP, e o servidor descartava a requisição.** O OpenSIPS 3.3.10
 do dono **descarta em silêncio os INVITEs de um User-Agent que não reconhece**: sem `407`,
-sem erro, absolutamente nada. Com `OpenSIPPhone/0.1.0` o servidor nunca desafiou. Com o
+sem erro, sem resposta final. Com `OpenSIPPhone/0.1.0` ele respondeu `100 Trying` duas
+vezes e depois nada, nunca — nem mesmo uma resposta ao nosso CANCEL. Os dois `100` provam
+que a requisição foi aceita e uma transação criada (o segundo vem do módulo `tm` do
+OpenSIPS, que só o emite depois que a transação existe), então não foi um pacote perdido
+na rede; o servidor simplesmente não produziu resposta final. Com o
 `User-Agent` de um softphone que ele reconhece, respondeu `407 Proxy Authentication
 Required`, e a chamada tocou e completou. Isso foi estabelecido capturando os dois clientes
 fazendo a mesma chamada a partir da mesma máquina; todo o resto da requisição era
@@ -445,8 +452,8 @@ O MVP está pronto quando, e somente quando, os quatro valem. Hoje:
 | # | Critério | Estado |
 | --- | --- | --- |
 | 1 | Uma chamada para um número externo é atendida e **uma pessoa do outro lado é ouvida e ouve o usuário**, em uma chamada real e em pelo menos uma conta | **Cumprido.** Uma chamada de saída real completou, com áudio ouvido nos dois sentidos |
-| 2 | Uma chamada recebida é atendida e leva áudio nos dois sentidos | **Não confirmado.** A sinalização de chamada recebida funciona (tocar, atender, rejeitar, encerrar); atender uma chamada recebida real e ouvir áudio nos dois sentidos não foi confirmado separadamente |
-| 3 | Duas contas estão registradas e em uso ao mesmo tempo, com uma chamada em cada | **Não confirmado.** Várias contas se registram ao mesmo tempo, verificado ao vivo; duas chamadas simultâneas, uma em cada, não foram confirmadas separadamente |
+| 2 | Uma chamada recebida é atendida e leva áudio nos dois sentidos | **Não confirmado.** INVITEs recebidos foram atendidos com `180` em um ambiente de teste; nenhuma chamada recebida foi atendida no app com áudio |
+| 3 | Duas contas estão registradas e em uso ao mesmo tempo, com uma chamada em cada | **Não confirmado.** Duas contas foram registradas simultaneamente apenas em um ambiente de teste descartável (3 de novembro), não no app; duas chamadas simultâneas, uma em cada, não foram tentadas |
 | 4 | Uma primeira release é publicada | **Não cumprido.** Nenhuma release foi publicada |
 
 Assim, o critério 1 está cumprido, os critérios 2 e 3 estão não confirmados em vez de
