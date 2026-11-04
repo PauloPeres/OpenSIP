@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAccount, headerValue } from '../../src/core/sip';
 import {
+  CUSTOM_USER_AGENT_CHOICE,
   DEFAULT_USER_AGENT,
   MAX_USER_AGENT_LENGTH,
+  USER_AGENT_PRESETS,
+  USER_AGENT_PRESET_LABEL_KEYS,
+  ZOIPER_USER_AGENT,
+  presetToSetting,
+  userAgentChoice,
   effectiveUserAgent,
   normaliseUserAgent,
   userAgentFromEnv
@@ -12,7 +18,7 @@ vi.mock('../../src/main/windows', () => ({ log: (): void => undefined }));
 
 describe('the User-Agent setting, as a value', () => {
   it('has the documented default', () => {
-    expect(DEFAULT_USER_AGENT).toBe('OpenSIPPhone/0.1.0');
+    expect(DEFAULT_USER_AGENT).toBe('Z 5.6.16 v2.10.20.18');
   });
 
   it('trims, and turns blank into blank (meaning: use the default)', () => {
@@ -87,5 +93,40 @@ describe('the User-Agent on the wire follows the setting, not the process start'
     const { agent, register } = await load();
     expect(agent.setUserAgent('  X/2\r\nEvil: 1 ')).toBe('X/2 Evil: 1');
     expect(register()).toBe('X/2 Evil: 1');
+  });
+});
+
+describe('the User-Agent presets', () => {
+  it('offers the default first, then our own name with version, then the bare token', () => {
+    expect(USER_AGENT_PRESETS).toEqual(['Z 5.6.16 v2.10.20.18', 'OpenSIPPhone/0.1.0', 'OpenSIPPhone']);
+    expect(USER_AGENT_PRESETS[0]).toBe(DEFAULT_USER_AGENT);
+    expect(DEFAULT_USER_AGENT).toBe(ZOIPER_USER_AGENT);
+  });
+
+  it('has a label key for every preset, and labels the default for what it is', () => {
+    expect(Object.keys(USER_AGENT_PRESET_LABEL_KEYS).sort()).toEqual([...USER_AGENT_PRESETS].sort());
+    expect(USER_AGENT_PRESET_LABEL_KEYS[DEFAULT_USER_AGENT]).toBe('settings.userAgent.preset.default');
+  });
+
+  it('shows a blank setting as the default preset', () => {
+    expect(userAgentChoice('')).toBe(DEFAULT_USER_AGENT);
+    expect(userAgentChoice('   ')).toBe(DEFAULT_USER_AGENT);
+  });
+
+  it('shows a stored preset as that preset, whatever surrounds it', () => {
+    expect(userAgentChoice('OpenSIPPhone')).toBe('OpenSIPPhone');
+    expect(userAgentChoice(' OpenSIPPhone/0.1.0 ')).toBe('OpenSIPPhone/0.1.0');
+    expect(userAgentChoice(DEFAULT_USER_AGENT)).toBe(DEFAULT_USER_AGENT);
+  });
+
+  it('shows anything else as Custom', () => {
+    expect(userAgentChoice('Z 5.6.16')).toBe(CUSTOM_USER_AGENT_CHOICE);
+    expect(userAgentChoice('OpenSIPPhone/9')).toBe(CUSTOM_USER_AGENT_CHOICE);
+  });
+
+  it('stores the default as blank so it keeps following the constant, and any other preset as itself', () => {
+    expect(presetToSetting(DEFAULT_USER_AGENT)).toBe('');
+    expect(presetToSetting('OpenSIPPhone')).toBe('OpenSIPPhone');
+    expect(presetToSetting('OpenSIPPhone/0.1.0')).toBe('OpenSIPPhone/0.1.0');
   });
 });

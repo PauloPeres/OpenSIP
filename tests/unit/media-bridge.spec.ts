@@ -8,6 +8,7 @@ import { MALFORMED_REPORT_INTERVAL_MS, openConnection } from '../../src/main/sip
 import { MAX_AUTH_ATTEMPTS, buildRegisterRequest } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
+import { setUserAgent } from '../../src/main/sip/user-agent';
 import { createMediaBridge } from '../../src/main/media/media-window';
 import type { MediaBridgeDeps, MediaWindowHandle } from '../../src/main/media/media-window';
 import { MEDIA_FRAME_SAMPLES, MEDIA_IPC, toPcmFrame } from '../../src/shared/media';
@@ -930,6 +931,75 @@ describe('engine call-setup guard', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('the hint for a server that goes quiet after 100', () => {
+    const HINT = 'calls.endHint.silentFilter';
+    const reach = async (h: Harness, responses: readonly number[]): Promise<void> => {
+      h.pbx.respond = (m) => (m.method === 'INVITE' ? responses.map((status) => reply(m, status)) : []);
+      await h.engine.dial('acc1', '55500000396');
+      await advance(CALL_SETUP_TIMEOUT_MS);
+    };
+
+    it('is shown on the ended call, and logged as a warning, when nothing but 100 ever came', async () => {
+      const h = await fakeClockHarness();
+      try {
+        await reach(h, [100]);
+        expect(view(h)?.endReasonKey).toBe(SILENT);
+        expect(view(h)?.endHintKey).toBe(HINT);
+        const logged = h.diagnostics.entries().filter((e) => e.messageKey === HINT);
+        expect(logged).toHaveLength(1);
+        expect(logged[0]?.level).toBe('warn');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is not shown when the far end rang first', async () => {
+      const h = await fakeClockHarness();
+      try {
+        await reach(h, [100, 180]);
+        expect(view(h)?.endReasonKey).toBe(SILENT);
+        expect(view(h)?.endHintKey).toBeUndefined();
+        expect(h.diagnostics.entries().some((e) => e.messageKey === HINT)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is not shown when the progress was a status the engine does not label, such as 181', async () => {
+      const h = await fakeClockHarness();
+      try {
+        await reach(h, [100, 181]);
+        expect(view(h)?.endHintKey).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('is not repeated once the User-Agent has been changed', async () => {
+      const h = await fakeClockHarness();
+      setUserAgent('OpenSIPPhone');
+      try {
+        await reach(h, [100]);
+        expect(view(h)?.endReasonKey).toBe(SILENT);
+        expect(view(h)?.endHintKey).toBeUndefined();
+        expect(h.diagnostics.entries().some((e) => e.messageKey === HINT)).toBe(false);
+      } finally {
+        setUserAgent('');
+        vi.useRealTimers();
+      }
+    });
+
+    it('is not shown for a call that ended with an ordinary rejection', async () => {
+      const h = await fakeClockHarness();
+      try {
+        await reach(h, [100, 486]);
+        expect(view(h)?.endHintKey).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('logs the timeout at warn level', async () => {

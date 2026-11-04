@@ -40,6 +40,7 @@ function EndedRows({ calls }: { readonly calls: readonly CallView[] }): JSX.Elem
         <p key={view.call.id} className="statusbar-row" role={isSetupTimeout(view) ? 'alert' : 'status'}>
           <strong><Breakable text={view.call.remoteIdentity} titled /></strong>
           <span className={cx('progress', isSetupTimeout(view) && 'progress-bad')}>{tw(endReasonKey(view) ?? ENDED)}</span>
+          {view.endHintKey === undefined ? null : <span className="statusbar-hint">{tw(view.endHintKey)}</span>}
         </p>
       ))}
     </>

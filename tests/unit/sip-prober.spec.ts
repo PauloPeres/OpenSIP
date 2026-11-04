@@ -3,6 +3,7 @@ import { NoReachableTransportError } from '../../src/core/sip/transport';
 import type { TransportCandidate } from '../../src/core/sip/transport';
 import { buildOptionsProbe, buildUpgradeRequest, discoverTransport, expectedAccept, isSipUpgrade } from '../../src/main/sip/prober';
 import type { ProbeDeps } from '../../src/main/sip/prober';
+import { DEFAULT_USER_AGENT } from '../../src/core/sip';
 
 type SrvAnswer = readonly { name: string; port: number; priority: number; weight: number }[];
 
@@ -226,6 +227,6 @@ describe('buildOptionsProbe (regression: a live Kamailio ignored a probe without
   });
 
   it('identifies itself', () => {
-    expect(probe()).toContain('User-Agent: OpenSIPPhone/0.1.0');
+    expect(probe()).toContain(`User-Agent: ${DEFAULT_USER_AGENT}`);
   });
 });

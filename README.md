@@ -60,6 +60,17 @@ If you need to pin one specific path, set the optional server field under **Adva
 
 ## Troubleshooting
 
+### What this phone says it is
+
+By default Open SIP Phone identifies itself in the SIP `User-Agent` header as
+`Z 5.6.16 v2.10.20.18`, which is the identity of Zoiper 5. It is not Zoiper; it is a
+compatibility identity. Many providers silently discard INVITEs from agents they do not
+recognise, and this is the value that was measured to connect against one such server. The
+choice is shown in **Settings → SIP User-Agent** as *Compatibility: Zoiper 5*. The app's own
+names, `OpenSIPPhone/0.1.0` and `OpenSIPPhone`, are available there too, and so is a custom
+value. If your provider accepts the app under its own name, use that. Asking the provider to
+allow Open SIP Phone is the better long-term fix.
+
 ### Calls vanish: no ringing, no error, nothing
 
 If registration works, but an outgoing call never progresses — the server answers
@@ -72,7 +83,7 @@ controllers commonly accept only clients they recognise, as an anti-fraud measur
 cannot be told what to identify as is unusable behind one.
 
 It was found this way: an OpenSIPS 3.3.10 server answered an INVITE that carried Open SIP
-Phone's default `User-Agent` (`OpenSIPPhone/0.1.0`) with `100 Trying` twice and then
+Phone's own `User-Agent` (`OpenSIPPhone/0.1.0`) with `100 Trying` twice and then
 nothing, ever — no `180`, no `407`, no final response, not even a reply to our CANCEL. The
 two `100`s show the request was accepted and a transaction created, so this is not a packet
 lost on the network: the server simply never produced a final answer. A second, already

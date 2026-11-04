@@ -65,6 +65,17 @@ Se precisar fixar um caminho específico, preencha o campo opcional de servidor 
 
 ## Solução de problemas
 
+### Como este telefone se identifica
+
+Por padrão, o Open SIP Phone se identifica no cabeçalho SIP `User-Agent` como
+`Z 5.6.16 v2.10.20.18`, que é a identidade do Zoiper 5. Ele não é o Zoiper; é uma identidade
+de compatibilidade. Muitos provedores descartam em silêncio INVITEs de agentes que não
+reconhecem, e este é o valor que, medido, conectou em um desses servidores. A escolha aparece
+em **Configurações → User-Agent SIP** como *Compatibilidade: Zoiper 5*. Os nomes do próprio
+aplicativo, `OpenSIPPhone/0.1.0` e `OpenSIPPhone`, também estão lá, assim como um valor
+personalizado. Se o seu provedor aceita o aplicativo com o nome dele, use esse. Pedir ao
+provedor que libere o Open SIP Phone é a melhor solução a longo prazo.
+
 ### As chamadas somem: sem toque, sem erro, sem nada
 
 Se o registro funciona, mas uma chamada de saída nunca avança — o servidor responde
@@ -78,7 +89,7 @@ em vez de recusá-lo. Um softphone que não pode ser instruído sobre como se id
 inutilizável atrás de um deles.
 
 Foi descoberto assim: um servidor OpenSIPS 3.3.10 respondeu a um INVITE que levava o
-`User-Agent` padrão do Open SIP Phone (`OpenSIPPhone/0.1.0`) com `100 Trying` duas vezes e
+`User-Agent` próprio do Open SIP Phone (`OpenSIPPhone/0.1.0`) com `100 Trying` duas vezes e
 depois nada, nunca — sem `180`, sem `407`, sem resposta final, nem mesmo uma resposta ao
 nosso CANCEL. Os dois `100` mostram que a requisição foi aceita e que uma transação foi
 criada, então não se trata de um pacote perdido na rede: o servidor simplesmente nunca

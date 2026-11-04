@@ -6,6 +6,7 @@ import type { IdFactory } from '../../src/main/sip/ids';
 import { MAX_AUTH_ATTEMPTS, buildOptionsRequest, buildRegisterRequest, register } from '../../src/main/sip/registrar';
 import type { RegisterParams } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
+import { DEFAULT_USER_AGENT } from '../../src/core/sip';
 
 const md5 = (s: string): string => createHash('md5').update(s).digest('hex');
 
@@ -100,7 +101,7 @@ describe('buildRegisterRequest', () => {
         'CSeq: 1 REGISTER',
         'Contact: <sip:1001@10.0.0.5:51234;transport=tcp>',
         'Expires: 600',
-        'User-Agent: OpenSIPPhone/0.1.0',
+        `User-Agent: ${DEFAULT_USER_AGENT}`,
         'Allow: INVITE, ACK, CANCEL, BYE, OPTIONS',
         'Content-Length: 0',
         '',
@@ -594,7 +595,7 @@ describe('buildOptionsRequest (keepalive ping)', () => {
         'To: <sip:pbx.example.com>',
         'Call-ID: call1@10.0.0.5',
         'CSeq: 7 OPTIONS',
-        'User-Agent: OpenSIPPhone/0.1.0',
+        `User-Agent: ${DEFAULT_USER_AGENT}`,
         'Content-Length: 0',
         '',
         ''

@@ -47,6 +47,7 @@ import {
   reduceRegistration,
   resumeDirection,
   serialize,
+  silentFilterHintKey,
   startKeepalive as freshKeepalive,
   withHeader
 } from '@core/sip';
@@ -63,6 +64,7 @@ import type {
   RegistrationSnapshot,
   SdpDirection,
   SessionDescription,
+  SetupEnd,
   SipAccount,
   SipHeaders,
   SipMessage,
@@ -82,7 +84,7 @@ import { defaultIdFactory } from './ids';
 import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
 import type { ProbeDeps } from './prober';
-import { currentUserAgent } from './user-agent';
+import { currentUserAgent, userAgentSetting } from './user-agent';
 import {
   MAX_AUTH_ATTEMPTS,
   TIMER_T1_MS,
@@ -172,6 +174,8 @@ export const ENDED_CALL_LINGER_MS = 8000;
 interface CallTrack {
   progress?: string;
   endReasonKey?: string;
+  /** A suggestion to show beside the reason, when there is one to make. */
+  endHintKey?: string;
   /** Wall-clock ms when the end reason was recorded; the row lapses ENDED_CALL_LINGER_MS later. */
   endedAt?: number;
 }
@@ -287,6 +291,8 @@ interface Dialog {
   media: LiveMedia | undefined;
   pending: Pending | undefined;
   setup: SetupGuard | undefined;
+  /** Every provisional status the INVITE got, in order; what tells a silent server from a slow one. */
+  provisionals: number[];
   /** The host our last SDP carried, to notice when the mapped address has since changed. */
   advertised: string;
   held: boolean;
@@ -590,11 +596,12 @@ function sessionOptions(localPort: number, plan: MediaPlan): RtpSessionOptions {
   };
 }
 
-function trackFields(track: CallTrack | undefined): Pick<CallView, 'progress' | 'endReasonKey'> {
-  const { progress, endReasonKey } = track ?? {};
+function trackFields(track: CallTrack | undefined): Pick<CallView, 'progress' | 'endReasonKey' | 'endHintKey'> {
+  const { progress, endReasonKey, endHintKey } = track ?? {};
   return {
     ...(progress === undefined ? {} : { progress }),
-    ...(endReasonKey === undefined ? {} : { endReasonKey })
+    ...(endReasonKey === undefined ? {} : { endReasonKey }),
+    ...(endHintKey === undefined ? {} : { endHintKey })
   };
 }
 
@@ -893,6 +900,7 @@ export class SipEngine {
 
   private onInviteResponse(dialog: Dialog, response: SipResponse): void {
     dialog.pending?.stop();
+    if (response.status < 200) dialog.provisionals.push(response.status);
     if (response.status < 200) return this.onProvisional(dialog, response);
     if (response.status < 300) return this.onAnswered(dialog, response);
     this.onInviteRejected(dialog, response);
@@ -943,8 +951,19 @@ export class SipEngine {
       level: 'warn',
       params: { callId, seconds: String(CALL_SETUP_TIMEOUT_MS / 1000) }
     });
+    this.suggestFor(dialog);
     this.dispatchCall(callId, { type: 'hangup' });
     this.cancel(dialog).catch(this.logSend);
+  }
+
+  /** Beside the timeout, in the call row and in the log alike: a thing to try when the silence has a known signature. */
+  private suggestFor(dialog: Dialog): void {
+    const end: SetupEnd = { direction: 'outbound', provisionals: dialog.provisionals, finalStatus: undefined, timedOut: true };
+    const hintKey = silentFilterHintKey(end, userAgentSetting());
+    const track = this.tracks.get(dialog.callId);
+    if (hintKey === undefined || track === undefined) return;
+    track.endHintKey = hintKey;
+    this.note(this.registry[dialog.callId]?.accountId, hintKey, { level: 'warn', params: { callId: dialog.callId } });
   }
 
   /** A challenge we answer with credentials is not the end of setup: the guard keeps its original deadline. */
@@ -1657,6 +1676,7 @@ export class SipEngine {
       media: undefined,
       pending: undefined,
       setup: undefined,
+      provisionals: [],
       advertised: '',
       held: false,
       muted: false,

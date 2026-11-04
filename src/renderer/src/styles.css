@@ -282,6 +282,7 @@ button.line:hover:not(:disabled) { border-color: var(--accent); }
 .status-failed, .status-displaced { color: var(--bad); }
 .statusbar { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-3) var(--s-5); border-bottom: 1px solid var(--line); background: var(--surface); }
 .statusbar-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); font-size: var(--fs-sm); }
+.statusbar-hint { flex-basis: 100%; font-size: var(--fs-sm); color: var(--fg-muted); max-width: 60ch; }
 .statusbar-row strong { min-width: 0; overflow-wrap: break-word; }
 .dial-status { margin: 0; }
 

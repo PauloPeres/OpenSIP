@@ -67,6 +67,8 @@ export interface CallView {
   readonly progress?: string;
   /** i18n key explaining why the call ended, when the user should be told. */
   readonly endReasonKey?: string;
+  /** i18n key of something worth trying, shown beside the reason; absent when there is nothing to suggest. */
+  readonly endHintKey?: string;
 }
 
 /**
@@ -87,7 +89,16 @@ export interface AccountSharing {
  * the shared layer; it is re-exported here, which is where the processes read it.
  */
 export { MAX_HISTORY_ENTRIES } from '@core/history';
-export { DEFAULT_USER_AGENT, MAX_USER_AGENT_LENGTH } from '@core/sip';
+export {
+  CUSTOM_USER_AGENT_CHOICE,
+  DEFAULT_USER_AGENT,
+  MAX_USER_AGENT_LENGTH,
+  USER_AGENT_PRESETS,
+  USER_AGENT_PRESET_LABEL_KEYS,
+  effectiveUserAgent,
+  presetToSetting,
+  userAgentChoice
+} from '@core/sip';
 export type { CallOutcome, CallRecord } from '@core/history';
 
 export interface AppSnapshot {
