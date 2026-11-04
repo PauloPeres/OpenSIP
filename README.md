@@ -32,8 +32,9 @@ Linux, from a single codebase, with automatic updates.
   clients they recognise; see [Troubleshooting](#troubleshooting).
 - **Bilingual interface** — English and Brazilian Portuguese, selectable at runtime.
   Not a single user-facing string is hardcoded; CI enforces it.
-- **Automatic updates** — built on `electron-updater`, so a release reaches users
-  without them downloading anything by hand.
+- **Updates** — built on `electron-updater`. Automatic on Windows and Linux (AppImage);
+  on macOS the app tells you a new version exists and links to the download until it is
+  signed with an Apple Developer ID (see [Install](#install)).
 - **Credentials at rest are encrypted** with Electron `safeStorage` when the platform
   supports it.
 - **Quality enforced by machine, not by opinion** — see [Quality gates](#quality-gates).
@@ -116,11 +117,19 @@ also refused by that server, with `484 Address Incomplete`.
 Download the installer for your platform from the
 [Releases](https://github.com/PauloPeres/OpenSIP/releases) page:
 
-- **macOS** — `Open SIP Phone-<version>-mac-<arch>.dmg` (Intel and Apple Silicon)
-- **Windows** — `Open SIP Phone-<version>-win-<arch>.exe`
-- **Linux** — `Open SIP Phone-<version>-linux-x64.AppImage` or `.deb`
+- **macOS** — `Open-SIP-Phone-<version>-mac-<arch>.dmg` (Intel and Apple Silicon)
+- **Windows** — `Open-SIP-Phone-<version>-win-<arch>.exe`
+- **Linux** — `Open-SIP-Phone-<version>-linux-x86_64.AppImage` or `.deb`
 
-The app checks for updates on startup and every six hours, and installs them on quit.
+The app checks for updates on startup and every six hours.
+
+- **Windows and Linux (AppImage)** — updates download in the background and install when
+  you quit. Windows shows a SmartScreen warning on first run because the installer is
+  not code-signed. The `.deb` does not update itself.
+- **macOS** — the build is not signed with an Apple Developer ID yet, and macOS refuses
+  to apply updates to such apps. The app notifies you when a new version exists and
+  offers a button to open the download page; install it over the old one.
+  Maintainers: see [docs/releasing.md](docs/releasing.md).
 
 ## Run from source
 

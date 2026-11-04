@@ -21,12 +21,13 @@ import {
 } from '@core/sip';
 import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, ValidationIssue } from '@core/sip';
 import { IPC, isDtmfDigit } from '../shared/api';
-import type { AccountDraft, AccountView, AppSnapshot, DialResult, MicAccess, SaveAccountResult } from '../shared/api';
+import type { AccountDraft, AccountView, AppSnapshot, DialResult, MicAccess, SaveAccountResult, UpdateStatus } from '../shared/api';
 import { loadState, saveState } from './account-storage';
 import type { PersistedState } from './account-storage';
 import { createMediaBridge } from './media';
 import { SipEngine } from './sip/engine';
 import { initialUserAgentSetting, setUserAgent, userAgentSetting } from './sip/user-agent';
+import { currentUpdateStatus, openReleasePage } from './updater';
 import { electronMediaDeps, isMediaWebContents, log } from './windows';
 
 /** At most one snapshot per ~two animation frames, however many log lines or call events arrive. */
@@ -291,6 +292,11 @@ function registerAccountSwitchHandler(controller: Controller): void {
 /** A fixed destination: nothing from the renderer reaches openExternal. Other platforms have no such deep link, so they do nothing. */
 const MAC_PRIVACY_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
 
+function registerUpdateHandlers(): void {
+  ipcMain.handle(IPC.getUpdateStatus, (): UpdateStatus => currentUpdateStatus());
+  ipcMain.handle(IPC.openReleasePage, (): Promise<void> => openReleasePage());
+}
+
 function registerSystemSettingsHandler(): void {
   ipcMain.handle(IPC.openSystemSettings, async (): Promise<void> => {
     if (process.platform === 'darwin') await shell.openExternal(MAC_PRIVACY_PANE);
@@ -359,6 +365,7 @@ function registerHandlers(controller: Controller): void {
   registerHistoryHandlers(controller);
   registerClipboardHandler();
   registerSystemSettingsHandler();
+  registerUpdateHandlers();
   registerMicPermissionHandler();
 }
 

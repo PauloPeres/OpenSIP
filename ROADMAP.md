@@ -339,7 +339,7 @@ plan.
 | Decision | Why it is open | What it blocks |
 | --- | --- | --- |
 | **MVP exit criteria 2–4** | A real outbound call connected, but answering a real incoming call with audio both ways, two accounts in simultaneous use, and a published first release are not yet confirmed or done. | Calling the MVP closed. |
-| **Apple Developer ID certificate** | The macOS build is ad-hoc signed: the keychain asks for permission on each build and Gatekeeper warns on download. Signing and notarising needs a paid Apple Developer account. | A credible macOS release; also reliable TCC permissions for Contacts and the microphone. |
+| **Apple Developer ID certificate** | The macOS build is ad-hoc signed: the keychain asks for permission on each build and Gatekeeper warns on download. Signing and notarising needs a paid Apple Developer account. | A credible macOS release; also reliable TCC permissions for Contacts and the microphone. Also macOS auto-update (the app only notifies today). Costs 99 USD/year. TODO and steps in [docs/releasing.md](docs/releasing.md#todo-apple-developer-id-certificate). |
 | **macOS 26 icon format** | The app does not ship the new Icon Composer format, so macOS 26 restyles the icon. | Cosmetic only; can wait. |
 | **Recording consent model** | Audible notice, per-call consent, visible indicator, or a combination; and what "record all" means under it. | Phase 3. |
 | **Recordings at rest** | Whether recordings are encrypted like credentials. History was decided: stored unencrypted, capped at 500 entries, clearable. | Phase 3. |

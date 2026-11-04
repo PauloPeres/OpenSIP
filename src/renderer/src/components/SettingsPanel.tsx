@@ -5,6 +5,7 @@ import { PermissionsSection } from './PermissionsSection';
 import { UserAgentField } from './UserAgentField';
 import type { UserAgentPref } from './UserAgentField';
 import { SelectField, Switch } from './ui/Field';
+import { Button } from './ui/Button';
 import { Segmented } from './ui/Segmented';
 import { THEMES, isTheme, useTheme } from '../state/theme';
 import { usePermissions } from '../state/permissions';
@@ -22,6 +23,10 @@ function updateText(t: TranslationApi['t'], status: UpdateStatus): string {
       return t('settings.updates.checking');
     case 'available':
       return t('settings.updates.available', { version: status.version });
+    case 'downloaded':
+      return t('settings.updates.downloaded', { version: status.version });
+    case 'manual':
+      return t('settings.updates.manual', { version: status.version });
     case 'upToDate': // i18n-exempt: discriminant
       return t('settings.updates.upToDate');
     case 'error':
@@ -69,13 +74,25 @@ function SoundSwitches({ ringtone, ringback }: { readonly ringtone: RingtonePref
 
 interface SettingsProps {
   readonly update: UpdateStatus;
+  readonly onOpenRelease: () => void;
   readonly ringtone: RingtonePref;
   readonly ringback: RingtonePref;
   readonly userAgent: UserAgentPref;
 }
 
-export function SettingsPanel({ update, ringtone, ringback, userAgent }: SettingsProps): JSX.Element {
+function UpdateSection({ update, onOpenRelease }: { readonly update: UpdateStatus; readonly onOpenRelease: () => void }): JSX.Element {
   const { t } = useTranslation();
+  return (
+    <>
+      <p className="muted" role="status">
+        {updateText(t, update)}
+      </p>
+      {update.kind === 'manual' ? <Button label={t('settings.updates.openRelease')} onClick={onOpenRelease} variant="primary" /> : null}
+    </>
+  );
+}
+
+export function SettingsPanel({ update, onOpenRelease, ringtone, ringback, userAgent }: SettingsProps): JSX.Element {
   const permissions = usePermissions();
   return (
     <div className="panel form">
@@ -84,9 +101,7 @@ export function SettingsPanel({ update, ringtone, ringback, userAgent }: Setting
       <SoundSwitches ringtone={ringtone} ringback={ringback} />
       <UserAgentField pref={userAgent} />
       <PermissionsSection model={permissions} />
-      <p className="muted" role="status">
-        {updateText(t, update)}
-      </p>
+      <UpdateSection update={update} onOpenRelease={onOpenRelease} />
     </div>
   );
 }

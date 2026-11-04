@@ -11,6 +11,8 @@ publish:
   provider: github
   owner: PauloPeres
   repo: OpenSIP
+  # Never published by the build: the owner reviews the draft and publishes it by hand (docs/releasing.md).
+  releaseType: draft
 mac:
   icon: build/icon.icns
   category: public.app-category.utilities
@@ -33,6 +35,9 @@ win:
       arch: [x64, arm64]
 linux:
   icon: build/icon.png
+  # .deb requires a maintainer and package.json's author has no email.
+  maintainer: Open SIP Phone Contributors <noreply@github.com>
+  category: Network
   target:
     - target: AppImage
       arch: [x64]

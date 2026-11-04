@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets release.yml run these same gates instead of repeating them.
+  workflow_call:
 
 jobs:
   quality:

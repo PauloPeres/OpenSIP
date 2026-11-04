@@ -28,6 +28,7 @@ export interface AppActions {
   readonly clearLogs: () => Promise<void>;
   readonly clearHistory: () => Promise<void>;
   readonly removeHistoryEntry: (id: string) => Promise<void>;
+  readonly openReleasePage: () => Promise<void>;
 }
 
 export interface AppState {
@@ -39,6 +40,15 @@ export interface AppState {
 
 function settingsActions(api: OpenSipApi): Pick<AppActions, 'setDebug' | 'setUserAgent'> {
   return { setDebug: (enabled) => api.setDebugLogging(enabled), setUserAgent: (value) => api.setUserAgent(value) };
+}
+
+function maintenanceActions(api: OpenSipApi): Pick<AppActions, 'clearLogs' | 'clearHistory' | 'removeHistoryEntry' | 'openReleasePage'> {
+  return {
+    clearLogs: () => api.clearLogs(),
+    clearHistory: () => api.clearHistory(),
+    removeHistoryEntry: (id) => api.removeHistoryEntry(id),
+    openReleasePage: () => api.openReleasePage()
+  };
 }
 
 function buildActions(): AppActions {
@@ -56,9 +66,7 @@ function buildActions(): AppActions {
     dtmf: (id, digit) => api.sendDtmf(id, digit),
     mute: (id, muted) => api.setMuted(id, muted),
     ...settingsActions(api),
-    clearLogs: () => api.clearLogs(),
-    clearHistory: () => api.clearHistory(),
-    removeHistoryEntry: (id) => api.removeHistoryEntry(id)
+    ...maintenanceActions(api)
   };
 }
 
@@ -81,6 +89,10 @@ export function useAppState(): AppState {
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     const api = getApi();
+    api
+      .getUpdateStatus()
+      .then((status) => setUpdate((current) => (current.kind === 'idle' ? status : current)))
+      .catch(() => undefined);
     api
       .getSnapshot()
       .then((raw) => setSnapshot(normalizeSnapshot(raw)))

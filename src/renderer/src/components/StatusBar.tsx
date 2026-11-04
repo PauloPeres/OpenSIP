@@ -1,4 +1,4 @@
-import type { AccountView } from '../../../shared/api';
+import type { AccountView, UpdateStatus } from '../../../shared/api';
 import { useTranslation } from '../i18n/TranslatorProvider';
 import type { CallView } from '../../../shared/api';
 import { endReasonKey, isSetupTimeout } from '../state/callProgress';
@@ -6,6 +6,7 @@ import { RegistrationNote } from './RegistrationNote';
 import { isDisplaced } from '../state/accountState';
 import { DisplacedNote } from './SharingNote';
 import { Breakable } from './ui/Breakable';
+import { Button } from './ui/Button';
 import { cx } from './ui/cx';
 
 function isNoteworthy(view: AccountView): boolean {
@@ -28,6 +29,20 @@ function RegistrationRows({ accounts }: { readonly accounts: readonly AccountVie
 interface BarProps {
   readonly accounts: readonly AccountView[];
   readonly calls: readonly CallView[];
+  readonly update: UpdateStatus;
+  readonly onOpenRelease: () => void;
+}
+
+/** Shown only when this install cannot update itself, so the user is told and given the way to do it by hand. */
+function UpdateRow({ update, onOpenRelease }: Pick<BarProps, 'update' | 'onOpenRelease'>): JSX.Element | null {
+  const { t } = useTranslation();
+  if (update.kind !== 'manual') return null;
+  return (
+    <p className="statusbar-row" role="status">
+      <strong>{t('settings.updates.statusbar', { version: update.version })}</strong>
+      <Button label={t('settings.updates.openRelease')} onClick={onOpenRelease} />
+    </p>
+  );
 }
 
 const ENDED = 'calls.progress.ended'; // i18n-exempt: translation key
@@ -48,13 +63,14 @@ function EndedRows({ calls }: { readonly calls: readonly CallView[] }): JSX.Elem
 }
 
 /** What the app is waiting on or has just failed at, visible from every view. */
-export function StatusBar({ accounts, calls }: BarProps): JSX.Element | null {
+export function StatusBar({ accounts, calls, update, onOpenRelease }: BarProps): JSX.Element | null {
   const ended = calls.filter((c) => c.call.state === 'ended' && endReasonKey(c) !== null);
-  if (!accounts.some(isNoteworthy) && ended.length === 0) return null;
+  if (!accounts.some(isNoteworthy) && ended.length === 0 && update.kind !== 'manual') return null;
   return (
     <div className="statusbar">
       <RegistrationRows accounts={accounts} />
       <EndedRows calls={ended} />
+      <UpdateRow update={update} onOpenRelease={onOpenRelease} />
     </div>
   );
 }

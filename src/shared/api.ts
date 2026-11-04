@@ -35,7 +35,9 @@ export const IPC = {
   copyText: 'opensip:clipboard:copy',
   openSystemSettings: 'opensip:system:settings',
   micPermission: 'opensip:system:mic',
-  updateStatus: 'opensip:update:status'
+  updateStatus: 'opensip:update:status',
+  getUpdateStatus: 'opensip:update:get',
+  openReleasePage: 'opensip:update:release'
 } as const;
 
 /** What the operating system says about microphone access (Electron's `getMediaAccessStatus`). */
@@ -140,7 +142,12 @@ export function isDtmfDigit(value: unknown): value is DtmfDigit {
 export type UpdateStatus =
   | { readonly kind: 'idle' }
   | { readonly kind: 'checking' }
+  /** A newer version exists and is downloading on its own. */
   | { readonly kind: 'available'; readonly version: string }
+  /** Downloaded; installs when the app quits. */
+  | { readonly kind: 'downloaded'; readonly version: string }
+  /** A newer version exists but this install cannot replace itself (unsigned macOS): the user downloads it. */
+  | { readonly kind: 'manual'; readonly version: string }
   | { readonly kind: 'upToDate' }
   | { readonly kind: 'error' };
 
@@ -183,6 +190,10 @@ export interface OpenSipApi {
   /** The OS's microphone grant. Takes no argument: ground truth the renderer cannot see itself. */
   micPermission(): Promise<MicAccess>;
   onSnapshot(cb: (snapshot: AppSnapshot) => void): Unsubscribe;
+  /** The latest status, for a window that opened after it was broadcast. */
+  getUpdateStatus(): Promise<UpdateStatus>;
+  /** Opens the project's releases page; the destination is fixed in the main process. */
+  openReleasePage(): Promise<void>;
   onUpdateStatus(cb: (status: UpdateStatus) => void): Unsubscribe;
 }
 

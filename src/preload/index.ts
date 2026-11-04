@@ -42,6 +42,8 @@ const api: OpenSipApi = {
   openSystemSettings: () => ipcRenderer.invoke(IPC.openSystemSettings),
   micPermission: () => ipcRenderer.invoke(IPC.micPermission),
   onSnapshot: (cb) => subscribe(IPC.subscribe, cb),
+  getUpdateStatus: () => ipcRenderer.invoke(IPC.getUpdateStatus),
+  openReleasePage: () => ipcRenderer.invoke(IPC.openReleasePage),
   onUpdateStatus: (cb) => subscribe(IPC.updateStatus, cb)
 };
 

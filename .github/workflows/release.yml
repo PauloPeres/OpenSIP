@@ -1,0 +1,108 @@
+name: release
+
+# Pushing a tag like v0.2.0 builds every platform and uploads the result to a DRAFT
+# GitHub release. Nothing reaches users until the owner publishes that draft.
+# See docs/releasing.md.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version from package.json
+        id: read
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: The tag must match package.json
+        if: github.ref_type == 'tag'
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION. Nothing was built."
+            exit 1
+          fi
+      - name: Refuse to touch a release that is already published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"v$VERSION\" and .draft == false) | .id")
+          if [ -n "$published" ]; then
+            echo "::error::v$VERSION is already published. Bump the version instead of rebuilding it."
+            exit 1
+          fi
+
+  # The same gates as every push, reused from ci.yml rather than copied.
+  quality:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [check, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # macOS: with no certificate secrets this stays ad-hoc signed through
+      # build/adhoc-sign.cjs. To sign for real, add MAC_CSC_LINK and MAC_CSC_KEY_PASSWORD
+      # as repository secrets (docs/releasing.md); nothing else here changes.
+      - name: Package and upload (macOS)
+        if: runner.os == 'macOS'
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CSC_LINK == '' && 'false' || 'true' }}
+
+      - name: Package and upload (Windows, Linux)
+        if: runner.os != 'macOS'
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # electron-updater needs all three metadata files; fail here rather than discover it later.
+  verify-draft:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: The draft holds every installer family and metadata file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"v$VERSION\" and .draft == true) | .assets[].name")
+          echo "$assets"
+          missing=0
+          for pattern in '^latest\.yml$' '^latest-mac\.yml$' '^latest-linux\.yml$' '\.dmg$' '\.zip$' '\.exe$' '\.AppImage$' '\.deb$'; do
+            if ! echo "$assets" | grep -Eq "$pattern"; then
+              echo "::error::The draft for v$VERSION has no asset matching $pattern"
+              missing=1
+            fi
+          done
+          exit $missing

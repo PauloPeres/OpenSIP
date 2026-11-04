@@ -90,7 +90,7 @@ function ViewContent({ view, state, model, now, setupStarts, ringtone, ringback,
   if (view === 'history') return <HistoryPanel snapshot={state.snapshot} actions={state.actions} onDialed={onRedialed} />;
   if (view === 'accounts') return <AccountsView state={state} />;
   if (view === 'logs') return <LogsPanel snapshot={state.snapshot} actions={state.actions} />;
-  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} ringback={ringback} userAgent={{ value: state.snapshot.userAgent, save: state.actions.setUserAgent }} />;
+  if (view === 'settings') return <SettingsPanel update={state.update} onOpenRelease={() => void state.actions.openReleasePage()} ringtone={ringtone} ringback={ringback} userAgent={{ value: state.snapshot.userAgent, save: state.actions.setUserAgent }} />;
   return <PhoneView state={state} model={model} now={now} setupStarts={setupStarts} />;
 }
 
@@ -141,7 +141,7 @@ function Alerts({ state, flow }: AlertsProps): JSX.Element {
         <IncomingCalls lines={flow.model.lines} accounts={accounts} onAnswer={flow.answer} onReject={(id) => void state.actions.reject(id)} />
       </ErrorBoundary>
       <ErrorBoundary>
-        <StatusBar accounts={accounts} calls={calls} />
+        <StatusBar accounts={accounts} calls={calls} update={state.update} onOpenRelease={() => void state.actions.openReleasePage()} />
       </ErrorBoundary>
     </>
   );

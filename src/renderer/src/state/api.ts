@@ -31,6 +31,8 @@ const OFFLINE_API: OpenSipApi = {
   openSystemSettings: none,
   micPermission: () => Promise.resolve('unknown'),
   onSnapshot: subscribeNone,
+  getUpdateStatus: () => Promise.resolve({ kind: 'idle' }),
+  openReleasePage: none,
   onUpdateStatus: subscribeNone
 };
 

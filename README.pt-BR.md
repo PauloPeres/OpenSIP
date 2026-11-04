@@ -35,8 +35,10 @@ automática.
 - **Interface bilíngue** — inglês e português do Brasil, alternáveis em tempo de
   execução. Nenhum texto visível ao usuário está escrito direto no código; a CI
   bloqueia quem tentar.
-- **Atualização automática** — construída sobre `electron-updater`, então uma nova
-  versão chega ao usuário sem download manual.
+- **Atualizações** — construídas sobre `electron-updater`. Automáticas no Windows e no
+  Linux (AppImage); no macOS o aplicativo avisa que há uma nova versão e leva você à
+  página de download, até ser assinado com um Apple Developer ID (veja
+  [Instalação](#instalação)).
 - **Credenciais criptografadas em repouso** com o `safeStorage` do Electron, quando a
   plataforma oferece suporte.
 - **Qualidade verificada por máquina, não por opinião** — veja
@@ -123,11 +125,19 @@ isso primeiro. Um `+` no início (E.164) também foi recusado por esse servidor,
 Baixe o instalador da sua plataforma na página de
 [Releases](https://github.com/PauloPeres/OpenSIP/releases):
 
-- **macOS** — `Open SIP Phone-<versão>-mac-<arch>.dmg` (Intel e Apple Silicon)
-- **Windows** — `Open SIP Phone-<versão>-win-<arch>.exe`
-- **Linux** — `Open SIP Phone-<versão>-linux-x64.AppImage` ou `.deb`
+- **macOS** — `Open-SIP-Phone-<versão>-mac-<arch>.dmg` (Intel e Apple Silicon)
+- **Windows** — `Open-SIP-Phone-<versão>-win-<arch>.exe`
+- **Linux** — `Open-SIP-Phone-<versão>-linux-x86_64.AppImage` ou `.deb`
 
-O aplicativo procura atualizações ao iniciar e a cada seis horas, e as instala ao sair.
+O aplicativo procura atualizações ao iniciar e a cada seis horas.
+
+- **Windows e Linux (AppImage)** — as atualizações são baixadas em segundo plano e
+  instaladas quando você sai. O Windows exibe um aviso do SmartScreen na primeira
+  execução, pois o instalador não tem assinatura de código. O `.deb` não se atualiza sozinho.
+- **macOS** — a compilação ainda não é assinada com um Apple Developer ID, e o macOS
+  recusa aplicar atualizações a esses aplicativos. O aplicativo avisa quando existe uma
+  nova versão e oferece um botão que abre a página de download; instale por cima da antiga.
+  Mantenedores: veja [docs/releasing.md](docs/releasing.md).
 
 ## Rodando a partir do código
 
