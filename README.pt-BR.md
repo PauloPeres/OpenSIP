@@ -1,18 +1,59 @@
-# Open SIP Phone
+<p align="center">
+  <img src="assets/logo-wordmark.svg" alt="Open SIP Phone" width="360">
+</p>
 
-[![ci](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg)](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml)
-[![licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <strong>Um softphone livre e de código aberto para quem usa mais de uma conta SIP.</strong><br>
+  macOS, Windows e Linux. Registre várias contas ao mesmo tempo, faça chamadas e leia exatamente o que o telefone está fazendo.
+</p>
 
-**Um softphone SIP livre, de código aberto e radicalmente simples.** Configure várias
-contas SIP, acompanhe o registro de cada uma e atenda as chamadas recebidas — no
-macOS, Windows e Linux, a partir de uma única base de código e com atualização
-automática.
+<p align="center">
+  <a href="https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml"><img src="https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licen%C3%A7a-MIT-blue.svg" alt="licença: MIT"></a>
+  <a href="README.md">Read in English</a>
+</p>
 
-🇺🇸 [Read in English](README.md)
+![Open SIP Phone em chamada: uma chamada ativa, outra em espera, três contas registradas](docs/screenshots/calls-and-lines.png)
+
+*Uma chamada ativa e outra em espera, cada uma em sua linha e em sua conta, com o discador ao lado. As contas e os números desta captura de tela são inventados. A interface na imagem está em inglês.*
+
+## Download
+
+| Plataforma | Download |
+| --- | --- |
+| **macOS**, Apple Silicon | [`.dmg` (arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **macOS**, Intel | [`.dmg` (x64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **Windows** | [instalador `.exe` (x64, arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **Linux** | [`.AppImage`](https://github.com/PauloPeres/OpenSIP/releases/latest) ou [`.deb`](https://github.com/PauloPeres/OpenSIP/releases/latest) (x64) |
+
+Todos os links levam à [última release](https://github.com/PauloPeres/OpenSIP/releases/latest). Nenhuma release foi publicada ainda; enquanto isso não acontece, essa página está vazia e o caminho é [Rodando a partir do código](#rodando-a-partir-do-código).
+
+Os instaladores ainda não têm assinatura de código, então o sistema vai avisar na primeira vez:
+
+- **macOS** — o aplicativo não é notarizado. Abra o `.dmg`, arraste o aplicativo para Aplicativos e, na primeira vez, **clique nele com o botão direito e escolha Abrir**, confirmando em seguida. O clique duplo é recusado. Em versões recentes do macOS, talvez seja preciso liberá-lo em **Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim**.
+- **Windows** — o SmartScreen exibirá um aviso. Escolha **Mais informações** e depois **Executar assim mesmo**.
+- **Linux** — torne o AppImage executável (`chmod +x`) e execute-o, ou instale o `.deb`.
+
+Os detalhes sobre atualizações estão em [Instalação](#instalação).
+
+## O que ele faz
+
+- **Várias contas ao mesmo tempo.** Adicione quantas contas SIP quiser e acompanhe o registro de cada uma, em tempo real.
+- **Chamadas com uma linha cada.** Faça uma chamada, coloque-a em espera e mantenha cada chamada em sua própria linha. As chamadas de saída foram verificadas com áudio ouvido nos dois sentidos.
+- **Só o domínio.** Você informa usuário, senha e domínio; ele descobre sozinho a porta e o protocolo, criptografado primeiro. Veja [Transporte](#transporte-você-dá-o-domínio-ele-descobre-o-resto).
+- **Um log que dá para ler.** A tela de diagnóstico conta o que aconteceu em palavras simples, por conta, e oculta as credenciais. Detalhes na segunda captura de tela abaixo.
+- **Histórico de chamadas.** Toda chamada é listada com sua conta e seu resultado, e dá para rediscar a partir dele.
+- **Inglês e português do Brasil**, alternáveis com o aplicativo em execução.
+
+![A tela de diagnóstico: três contas se registrando por TLS, TCP e UDP, e depois uma chamada de saída](docs/screenshots/diagnostics.png)
+
+*Diagnóstico: três contas se registram por três transportes diferentes, escolhidos automaticamente, seguidas de uma chamada de saída. De novo, todos os endereços e números aqui são inventados. A interface na imagem está em inglês.*
+
+Esta é uma versão inicial. A tabela de [Situação atual](#situação-atual) diz o que foi verificado em um servidor real e o que não foi.
 
 ---
 
-## Funcionalidades
+## Funcionalidades em detalhe
 
 - **Múltiplas contas SIP** — registre várias contas ao mesmo tempo e veja o estado de
   registro de cada uma em tempo real.

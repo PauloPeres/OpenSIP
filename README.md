@@ -1,17 +1,59 @@
-# Open SIP Phone
+<p align="center">
+  <img src="assets/logo-wordmark.svg" alt="Open SIP Phone" width="360">
+</p>
 
-[![ci](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg)](https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <strong>A free, open source softphone for people who use more than one SIP account.</strong><br>
+  macOS, Windows and Linux. Register several accounts at once, place calls, and read exactly what the phone is doing.
+</p>
 
-**A free, open source and radically simple SIP softphone.** Configure multiple SIP
-accounts, see each one register, and answer incoming calls — on macOS, Windows and
-Linux, from a single codebase, with automatic updates.
+<p align="center">
+  <a href="https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml"><img src="https://github.com/PauloPeres/OpenSIP/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+  <a href="README.pt-BR.md">Leia em português</a>
+</p>
 
-🇧🇷 [Leia em português](README.pt-BR.md)
+![Open SIP Phone on a call: one call active, one on hold, three accounts registered](docs/screenshots/calls-and-lines.png)
+
+*One call active and one on hold, each on its own line and account, with the dialer beside them. The accounts and numbers in this screenshot are made up.*
+
+## Download
+
+| Platform | Download |
+| --- | --- |
+| **macOS**, Apple Silicon | [`.dmg` (arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **macOS**, Intel | [`.dmg` (x64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **Windows** | [`.exe` installer (x64, arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
+| **Linux** | [`.AppImage`](https://github.com/PauloPeres/OpenSIP/releases/latest) or [`.deb`](https://github.com/PauloPeres/OpenSIP/releases/latest) (x64) |
+
+All links go to the [latest release](https://github.com/PauloPeres/OpenSIP/releases/latest). No release has been published yet, so until one is, that page is empty and the way in is [Run from source](#run-from-source).
+
+The installers are not code-signed yet, so your system will warn you the first time:
+
+- **macOS** — the app is not notarised. Open the `.dmg`, drag the app to Applications, then **right-click it and choose Open** the first time, and confirm. Double-clicking is refused. On recent macOS versions you may instead have to allow it under **System Settings → Privacy & Security → Open Anyway**.
+- **Windows** — SmartScreen will show a warning. Choose **More info**, then **Run anyway**.
+- **Linux** — make the AppImage executable (`chmod +x`) and run it, or install the `.deb`.
+
+Details on updates are under [Install](#install).
+
+## What it does
+
+- **Several accounts at once.** Add as many SIP accounts as you like and watch each one register, live.
+- **Calls with one line each.** Place a call, hold it, and keep each call on its own line. Outbound calls have been verified with audio heard in both directions.
+- **Just a domain.** You give it a username, a password and a domain; it finds the port and protocol itself, encrypted first. See [Transport](#transport-you-give-it-a-domain-it-works-out-the-rest).
+- **A log you can read.** The diagnostics view says what happened in plain words, per account, and hides credentials. Details in the second screenshot below.
+- **Call history.** Every call is listed with its account and outcome, and you can redial from it.
+- **English and Brazilian Portuguese**, switchable while the app runs.
+
+![The diagnostics view: three accounts registering over TLS, TCP and UDP, then an outgoing call](docs/screenshots/diagnostics.png)
+
+*Diagnostics: three accounts register over three different transports, picked automatically, followed by an outgoing call. Again, every address and number here is made up.*
+
+This is an early version. The [Status](#status) table says what has been verified on a real server and what has not.
 
 ---
 
-## Features
+## Features in detail
 
 - **Multiple SIP accounts** — register several accounts at the same time and see the
   registration state of each one live.
