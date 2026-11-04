@@ -35,14 +35,25 @@ branch you pick and still only produces a draft.
    run for a version that is already published.
 2. **quality** calls `ci.yml` as a reusable workflow, so the release runs exactly the
    gates every push runs (typecheck, lint, i18n, coverage, BDD, CRAP, duplication,
-   mutation). The cost is that CI's own `build` job runs again; that is accepted
-   rather than duplicating the steps.
+   mutation). It passes `package: false`, which skips CI's own `build` job (a plain
+   Vite bundle on three operating systems): step 3 packages every platform anyway, and
+   running both would ask GitHub for two macOS runners where one does the real work.
 3. **build** runs on `macos-latest` (x64 and arm64), `windows-latest` (x64 and arm64)
    and `ubuntu-latest` (x64), each calling `electron-builder --publish always`. Every
    platform uploads its installers and its metadata file to the same draft
    (`electron-builder.yml` sets `releaseType: draft`).
 4. **verify-draft** fails unless the draft holds `latest.yml`, `latest-mac.yml`,
    `latest-linux.yml` and a `.dmg`, `.zip`, `.exe`, `.AppImage` and `.deb`.
+
+Every job has a `timeout-minutes` (quality 30, CI build 20, check and verify-draft 10,
+release build 45), so a hung job fails in a bounded time. Note this limits a job once
+it is running; it is not known to shorten the time a job can wait for a scarce runner.
+
+Pushing `main` and a tag together starts `ci` (for `main`) and `release` (for the tag).
+Both finish quality at about the same time, so `ci`'s macOS build and the release's
+macOS packaging can be requested together. If macOS runners are scarce, push `main`
+first and the tag once `ci` is green: the tag alone starts only `release`. A tag does
+not trigger `ci`; the release runs the full quality gate itself.
 
 Needed secrets: only `GITHUB_TOKEN`, which GitHub provides. The workflow asks for
 `contents: write`. No repository variables are used. The optional `MAC_CSC_LINK` and

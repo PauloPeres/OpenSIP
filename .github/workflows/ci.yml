@@ -6,17 +6,26 @@ on:
   pull_request:
   # Lets release.yml run these same gates instead of repeating them.
   workflow_call:
+    inputs:
+      # release.yml passes false: it packages every platform itself, so the plain Vite
+      # build here would only occupy a second macOS runner for work it repeats.
+      # Pushes and pull requests have no inputs, so the build job treats "unset" as true.
+      package:
+        description: Also run the cross-platform build job
+        type: boolean
+        default: true
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # ~14 min on Node 22 (mutation testing); ~2x headroom
     strategy:
       fail-fast: false
       matrix:
         node-version: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -41,14 +50,19 @@ jobs:
 
   build:
     needs: quality
+    # `inputs` is empty on push/pull_request, so compare the stringified value: null
+    # becomes '' (build), true 'true' (build), false 'false' (skip). A bare
+    # `inputs.package != false` would wrongly skip, because null == false in expressions.
+    if: ${{ format('{0}', inputs.package) != 'false' }}
+    timeout-minutes: 20 # Vite bundle: ~1 min on the slowest OS
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
