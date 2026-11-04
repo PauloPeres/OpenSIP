@@ -516,6 +516,60 @@ describe('keepalive and dead-flow detection', () => {
       expect(reinvites(r, 0)).toHaveLength(1);
     });
 
+    it.each([408, 480, 500, 503, 504, 603])('keeps the call when a refresh REGISTER fails with %i, and recovers on its own', async (status) => {
+      const r = await withActiveCall();
+      let refused = false;
+      r.script.register = (m, n) => (n === 2 && !refused ? ((refused = true), reply(m, status)) : reply(m, 200, { expires: ['300'] }));
+      for (let i = 0; i < 100 && !refused; i += 1) { media.rx += 250; await advance(5_000); }
+      expect(refused).toBe(true);
+      expect(stateOf(r)).toBe('failed');
+      expect(callStates(r)).toEqual(['active']);
+      for (let i = 0; i < 12; i += 1) { media.rx += 250; await advance(5_000); }
+      expect(stateOf(r)).toBe('registered');
+      expect(callStates(r)).toEqual(['active']);
+      expect(hangups(r)).toHaveLength(0);
+    });
+
+    it('keeps the call when a credential failure ends the retries; only the user can fix that registration', async () => {
+      const r = await withActiveCall();
+      r.script.register = (m, n) => (n === 1 ? reply(m, 200, { expires: ['300'] }) : reply(m, 403));
+      for (let i = 0; i < 100 && stateOf(r) !== 'failed'; i += 1) { media.rx += 250; await advance(5_000); }
+      expect(stateOf(r)).toBe('failed');
+      expect(callStates(r)).toEqual(['active']);
+    });
+
+    it('keeps the call when the transport closes, reopens, and tells the far end the new address', async () => {
+      const r = await withActiveCall();
+      r.links[0]?.drop('ECONNRESET');
+      await advanceUntil(() => r.opens() === 2);
+      await advance(100);
+      expect(stateOf(r)).toBe('registered');
+      expect(callStates(r)).toEqual(['active']);
+      expect(hangups(r)).toHaveLength(0);
+      expect(reinvites(r, 1)).toHaveLength(1);
+      const view = r.engine.getCallViews()[0];
+      await r.engine.hangup(view?.call.id as string);
+      expect(r.links[1]?.requests('BYE')).toHaveLength(1);
+    });
+
+    it('does not send a target-refresh re-INVITE when no call is up', async () => {
+      const r = rig('udp');
+      await start(r);
+      r.links[0]?.drop();
+      await advanceUntil(() => r.opens() === 2);
+      await advance(100);
+      expect(r.links[1]?.requests('INVITE')).toHaveLength(0);
+    });
+
+    it('ends the call when the far end hangs up, whatever the registration is doing', async () => {
+      const r = await withActiveCall();
+      r.links[0]?.drop();
+      await advance(10);
+      const bye = { kind: 'request', method: 'BYE', uri: 'sip:1000@x', body: '', headers: { ...(r.links[0]?.requests('INVITE')[0] as SipRequest).headers, via: ['SIP/2.0/UDP pbx.test'], from: [(headerValue((r.links[0]?.requests('INVITE')[0] as SipRequest).headers, 'to') ?? '') + ';tag=pbx1'], to: [headerValue((r.links[0]?.requests('INVITE')[0] as SipRequest).headers, 'from') ?? ''], cseq: ['9 BYE'] } } as SipRequest;
+      r.links[0]?.inject(bye);
+      expect(callStates(r)).toEqual([]);
+    });
+
     it('does end the call when the account is turned off', async () => {
       const r = await withActiveCall();
       await r.engine.stopAccount('acc1');

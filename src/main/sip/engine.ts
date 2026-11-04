@@ -221,11 +221,6 @@ interface Entry {
   /** An Expires the registrar insisted on (423 Min-Expires), kept for every later refresh. */
   expires: number | undefined;
   keepalive: Keepalive | undefined;
-  /**
-   * Set when the flow was declared dead by inference. Calls then survive: the connection is replaced and the
-   * registration recovered, but nothing hangs up on a guess. Cleared once registered again.
-   */
-  keepCalls: boolean;
 }
 
 interface MediaPlan {
@@ -293,8 +288,8 @@ interface Dialog {
   muted: boolean;
   cancelled: boolean;
   connectedAt: number | undefined;
-  /** The connection our last target-refresh re-INVITE went out on, so a replaced one is told about at most once. */
-  refreshedOn: SipConnection | undefined;
+  /** The connection whose address the far end last learned (Contact), so a replaced connection is announced once. */
+  contactOn: SipConnection | undefined;
 }
 
 type DialogBase = Pick<
@@ -315,8 +310,7 @@ function newEntry(account: SipAccount): Entry {
     failures: 0,
     raises: 0,
     expires: undefined,
-    keepalive: undefined,
-    keepCalls: false
+    keepalive: undefined
   };
 }
 
@@ -731,6 +725,7 @@ export class SipEngine {
     this.entries.delete(id);
     this.clearTimer(entry);
     await this.unregister(entry);
+    this.endCallsOf(entry.account.id);
     this.dropConnection(entry);
     this.emit();
   }
@@ -1225,6 +1220,10 @@ export class SipEngine {
   /**
    * Whether and when to try again is core/sip/retry.ts's decision. A 423 is not a failure at all: the
    * registrar named the shortest Expires it accepts, so register again with that.
+   *
+   * A registration problem never ends a call: the media path is another socket and address, so the RTP
+   * watchdog (core/rtp/flow.ts) is what judges a call. Only stopAccount, the far end, the user and the call's
+   * own guards end one.
    */
   private fail(entry: Entry, reason: string, failure: RegistrationFailure): void {
     if (entry.stopped) return;
@@ -1233,7 +1232,7 @@ export class SipEngine {
     entry.failures += 1;
     this.forgetSharing(entry);
     this.clearTimer(entry);
-    this.dropConnection(entry, !entry.keepCalls);
+    this.dropConnection(entry);
     this.dispatchRegistration(entry, { type: 'failed', reason });
     if (decision.action === 'retry') this.scheduleRetry(entry, decision.delayMs);
   }
@@ -1350,7 +1349,6 @@ export class SipEngine {
    */
   private declareDead(entry: Entry): void {
     this.note(entry.account.id, 'logs.event.deadFlow', { level: 'warn' });
-    entry.keepCalls = true;
     entry.failures += 1;
     this.forgetSharing(entry);
     this.clearTimer(entry);
@@ -1372,12 +1370,11 @@ export class SipEngine {
     if (result.ok) this.note(account.id, 'logs.event.unregistered');
   }
 
-  private dropConnection(entry: Entry, endCalls = true): void {
+  private dropConnection(entry: Entry): void {
     const { connection } = entry;
     entry.connection = undefined;
     this.endKeepalive(entry);
     connection?.close();
-    if (endCalls) this.endCallsOf(entry.account.id);
   }
 
   private clearTimer(entry: Entry): void {
@@ -1440,20 +1437,19 @@ export class SipEngine {
   }
 
   private reoffer(dialog: Dialog): void {
-    dialog.refreshedOn = dialog.entry.connection;
+    dialog.contactOn = dialog.entry.connection;
     this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction)).catch(this.logSend);
   }
 
   /**
-   * After a dead flow was replaced, every confirmed call still names the old socket in its Contact, so the far
+   * After the connection was replaced (dead flow, transport close, any registration failure), every confirmed
+   * call may still name the old socket in its Contact, so the far
    * end would keep sending BYE and re-INVITE there. A re-INVITE on the new connection refreshes the remote
    * target (RFC 3261 section 12.2.1.1). One already sent for the same reason (a changed mapped address) is enough.
    */
   private recoverCalls(entry: Entry): void {
-    if (!entry.keepCalls) return;
-    entry.keepCalls = false;
     this.confirmedDialogs(entry)
-      .filter((dialog) => dialog.refreshedOn !== entry.connection)
+      .filter((dialog) => dialog.contactOn !== entry.connection)
       .forEach((dialog) => this.reoffer(dialog));
   }
 
@@ -1609,7 +1605,7 @@ export class SipEngine {
       muted: false,
       cancelled: false,
       connectedAt: undefined,
-      refreshedOn: undefined
+      contactOn: base.entry.connection
     };
   }
 
