@@ -4,7 +4,7 @@ import { createAccount, headerValue } from '../../src/core/sip';
 import type { SipMessage, SipRequest, SipResponse, TransportCandidate } from '../../src/core/sip';
 import type { MediaBridge } from '../../src/main/media/media-window';
 import type { RtpSession, RtpSessionOptions } from '../../src/main/media/rtp-session';
-import { openConnection } from '../../src/main/sip/connection';
+import { MALFORMED_REPORT_INTERVAL_MS, openConnection } from '../../src/main/sip/connection';
 import { MAX_AUTH_ATTEMPTS, buildRegisterRequest } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 import { CALL_SETUP_TIMEOUT_MS, CALL_WAITING_GRACE_MS, ENDED_CALL_LINGER_MS, SipEngine } from '../../src/main/sip/engine';
@@ -1397,6 +1397,73 @@ describe('UDP connection', () => {
   });
 });
 
+describe('UDP connection: datagrams that do not parse', () => {
+  const candidate = { transport: 'udp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
+  const peer = { address: '198.51.100.9', port: 5088 };
+  type Notice = { level: string; messageKey: string; params: Record<string, string> };
+  type Fake = { receive: (data: string, from: typeof peer, server: typeof candidate) => void };
+  const hash = 'deadbeefcafe0123456789abcdef0123';
+  const leaky = `INVITE garbage\r\nAuthorization: Digest username="1000", realm="pbx", response="${hash}"\r\n\r\n`;
+
+  async function open(): Promise<{ socket: Fake; notices: Notice[]; messages: SipMessage[] }> {
+    const notices: Notice[] = [];
+    const messages: SipMessage[] = [];
+    const connection = await openConnection(candidate, { onNotice: (notice) => notices.push(notice) });
+    connection.onMessage((message) => messages.push(message));
+    return { socket: udp.sockets.at(-1) as Fake, notices, messages };
+  }
+
+  it('records one debug entry carrying the source and the byte length', async () => {
+    const { socket, notices } = await open();
+    socket.receive('not sip at all', peer, candidate);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      level: 'debug',
+      messageKey: 'logs.event.datagramDropped',
+      params: { source: '198.51.100.9:5088', bytes: '14', skipped: '0' }
+    });
+    expect(notices[0]?.params.prefix).toContain('not sip');
+  });
+
+  it('redacts the content: an Authorization response hash never reaches the notice', async () => {
+    const { socket, notices } = await open();
+    socket.receive(leaky, peer, candidate);
+    expect(notices).toHaveLength(1);
+    expect(JSON.stringify(notices)).not.toContain(hash);
+    expect(notices[0]?.params.prefix).toContain('Authorization');
+  });
+
+  it('treats a CRLF keepalive, in both lengths, as no error at all', async () => {
+    const { socket, notices, messages } = await open();
+    socket.receive('\r\n\r\n', peer, candidate);
+    socket.receive('\r\n', peer, candidate);
+    expect(notices).toEqual([]);
+    expect(messages).toEqual([]);
+  });
+
+  it('does not report a datagram that parses', async () => {
+    const { socket, notices, messages } = await open();
+    socket.receive('SIP/2.0 180 Ringing\r\nCall-ID: abc\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n', peer, candidate);
+    expect(messages).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+
+  it('bounds a flood to one entry per window, then reports how many it suppressed', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socket, notices } = await open();
+      for (let i = 0; i < 5000; i += 1) socket.receive('garbage', peer, candidate);
+      expect(notices).toHaveLength(1);
+      vi.advanceTimersByTime(MALFORMED_REPORT_INTERVAL_MS);
+      socket.receive('garbage', peer, candidate);
+      expect(notices).toHaveLength(2);
+      expect(notices[1]?.params.skipped).toBe('4999');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('engine INVITE digest challenge (Zoiper wire trace against OpenSIPS)', () => {
   const UNAUTHORIZED = 'registration.error.unauthorized';
   const challenge = (nonce: string, extra = ''): string =>
@@ -1476,5 +1543,90 @@ describe('engine INVITE digest challenge (Zoiper wire trace against OpenSIPS)', 
     const keys = h.diagnostics.entries().map((e) => `${e.messageKey}:${e.params?.['status'] ?? ''}`);
     expect(keys).toContain('logs.event.received:407');
     expect(keys).toContain('logs.event.challenged:');
+  });
+});
+
+describe('engine NAT address in outbound requests', () => {
+  const PUBLIC = '198.51.100.7';
+  const LOCAL = '10.0.0.5';
+  const withoutMapping = (res: SipResponse): SipResponse => ({
+    ...res,
+    headers: { ...res.headers, via: (res.headers['via'] ?? []).map((v) => v.replace(/;received=[^;]*/, '').replace(/;rport=\d+/, '')) }
+  });
+  const addressLines = (body: string): string[] => body.split('\r\n').filter((l) => l.startsWith('o=') || l.startsWith('c='));
+  const answerAll = (h: Harness): void => {
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [reply(m, 100), reply(m, 180), reply(m, 200, {}, ANSWER)] : []);
+  };
+
+  it('advertises the learned public address in Contact, o= and c=, never the local one', async () => {
+    const h = harness();
+    await registered(h);
+    answerAll(h);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    const invite = h.pbx.requests('INVITE')[0] as SipRequest;
+    expect(headerValue(invite.headers, 'contact')).toContain(`${PUBLIC}:5099`);
+    expect(headerValue(invite.headers, 'contact')).not.toContain(LOCAL);
+    const lines = addressLines(invite.body);
+    expect(lines).toHaveLength(2);
+    for (const line of lines) expect(line).toContain(`IN IP4 ${PUBLIC}`);
+    expect(invite.body).not.toContain(LOCAL);
+    expect(headerValue(invite.headers, 'call-id')).toContain(PUBLIC);
+  });
+
+  it('dials with the local address and warns when nothing has been learned yet', async () => {
+    const h = harness();
+    h.pbx.respond = (m) => (m.method === 'REGISTER' ? [withoutMapping(reply(m, 200, { expires: ['300'] }))] : []);
+    await h.engine.startAccount(createAccount({ displayName: 'Me', username: '1000', password: 'secret', domain: 'pbx.test' }, 'acc1'));
+    await settle(); await settle();
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [withoutMapping(reply(m, 100))] : []);
+    expect(await h.engine.dial('acc1', '1001')).toMatchObject({ ok: true });
+    await settle();
+    const invite = h.pbx.requests('INVITE')[0] as SipRequest;
+    expect(addressLines(invite.body).every((l) => l.includes(`IN IP4 ${LOCAL}`))).toBe(true);
+    expect(headerValue(invite.headers, 'contact')).toContain(LOCAL);
+    const warn = h.diagnostics.entries().find((e) => e.messageKey === 'logs.event.natUnknown');
+    expect(warn?.level).toBe('warn');
+  });
+
+  it('learns the address from the INVITE response and corrects the offer with a re-INVITE once answered', async () => {
+    const h = harness();
+    h.pbx.respond = (m) => (m.method === 'REGISTER' ? [withoutMapping(reply(m, 200, { expires: ['300'] }))] : []);
+    await h.engine.startAccount(createAccount({ displayName: 'Me', username: '1000', password: 'secret', domain: 'pbx.test' }, 'acc1'));
+    await settle(); await settle();
+    answerAll(h);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    const [first, refresh] = h.pbx.requests('INVITE') as SipRequest[];
+    expect(first?.body).toContain(`IN IP4 ${LOCAL}`);
+    expect(refresh).toBeDefined();
+    expect(addressLines(refresh?.body ?? '').every((l) => l.includes(`IN IP4 ${PUBLIC}`))).toBe(true);
+    expect(headerValue(refresh?.headers ?? {}, 'contact')).toContain(PUBLIC);
+    expect(h.pbx.requests('INVITE')).toHaveLength(2);
+  });
+
+  it('re-offers a connected call when the mapped address changes, and uses it for the next call', async () => {
+    const h = harness();
+    await registered(h);
+    answerAll(h);
+    await h.engine.dial('acc1', '1001');
+    await settle();
+    const callId = h.engine.getCallViews()[0]?.call.id as string;
+    const invite = h.pbx.requests('INVITE')[0] as SipRequest;
+    const base = reply(invite, 200);
+    const moved: SipResponse = { ...base, headers: { ...base.headers, via: [`${(invite.headers['via'] ?? [''])[0]};received=203.0.113.77;rport=6000`] } };
+    h.pbx.inject(moved);
+    await settle();
+    const reoffer = h.pbx.requests('INVITE')[1] as SipRequest;
+    expect(addressLines(reoffer.body).every((l) => l.includes('IN IP4 203.0.113.77'))).toBe(true);
+    expect(headerValue(reoffer.headers, 'contact')).toContain('203.0.113.77:6000');
+    await h.engine.hangup(callId);
+    const remap = (res: SipResponse): SipResponse => ({ ...res, headers: { ...res.headers, via: (res.headers['via'] ?? []).map((v) => v.replace(PUBLIC, '203.0.113.77').replace('rport=5099', 'rport=6000')) } });
+    h.pbx.respond = (m) => (m.method === 'INVITE' ? [remap(reply(m, 100)), remap(reply(m, 200, {}, ANSWER))] : []);
+    await h.engine.dial('acc1', '1002');
+    await settle();
+    const next = h.pbx.requests('INVITE').at(-1) as SipRequest;
+    expect(headerValue(next.headers, 'contact')).toContain('203.0.113.77:6000');
+    expect(next.body).not.toContain(PUBLIC);
   });
 });

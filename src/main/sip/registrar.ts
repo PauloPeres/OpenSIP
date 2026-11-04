@@ -3,8 +3,10 @@ import {
   buildAuthorization,
   headerValue,
   headerValues,
+  isOurBinding,
   isResponse,
   otherBindings,
+  parseContactBindings,
   parseChallenge,
   parseParameters,
   withHeader
@@ -57,7 +59,15 @@ export interface AcceptedRegistration {
 
 export type RegisterResult =
   | AcceptedRegistration
-  | { ok: false; status: number; errorKey: string };
+  | {
+      ok: false;
+      status: number;
+      errorKey: string;
+      /** Seconds from the response's Retry-After, when it had a numeric one. */
+      retryAfter?: number;
+      /** Seconds from the response's Min-Expires (423), when it had a numeric one. */
+      minExpires?: number;
+    };
 
 type AuthHeaderName = 'authorization' | 'proxy-authorization';
 
@@ -126,6 +136,22 @@ export function buildRegisterRequest(
   return { kind: 'request', method: 'REGISTER', uri: `sip:${account.domain}`, headers, body: '' };
 }
 
+/** A bare OPTIONS to the server: any answer, even an error, proves the path works and refreshes the NAT binding. */
+export function buildOptionsRequest(params: RegisterParams, ids: IdFactory, cseq: number): SipRequest {
+  const { account, candidate } = params;
+  const local = localAddressOf(params);
+  const headers: SipHeaders = {
+    via: [`SIP/2.0/${candidate.transport.toUpperCase()} ${local.host}:${local.port};branch=${ids.newBranch()};rport`],
+    'max-forwards': ['70'],
+    from: [`<${account.uri}>;tag=${ids.newTag()}`],
+    to: [`<sip:${account.domain}>`],
+    'call-id': [ids.newCallId(local.host)],
+    cseq: [`${cseq} OPTIONS`],
+    'user-agent': [USER_AGENT]
+  };
+  return { kind: 'request', method: 'OPTIONS', uri: `sip:${account.domain}`, headers, body: '' };
+}
+
 /* ---------------------------------------------------------------- waiting */
 
 interface Waiter {
@@ -171,14 +197,21 @@ function awaitFinal(deps: RegistrarDeps, request: SipRequest, resend?: () => voi
   return { response, cancel };
 }
 
-/** Learns the NAT-mapped address from the top Via of a response (RFC 3581). */
-function learnPublicAddress(connection: SipConnection, response: SipResponse): void {
+/**
+ * Learns the NAT-mapped address from the top Via of ANY response on the connection (RFC 3581): the server
+ * reports what it sees whether the response answers a REGISTER, an OPTIONS ping or an INVITE. Returns whether
+ * the mapping is new or differs from the one held, so a caller can react to a move.
+ */
+export function learnPublicAddress(connection: SipConnection, response: SipResponse): boolean {
   const via = headerValues(response.headers, 'via')[0];
-  if (via === undefined) return;
+  if (via === undefined) return false;
   const { received, rport } = parseParameters(via);
-  if (received === undefined || received === '') return;
+  if (received === undefined || received === '') return false;
   const port = Number.parseInt(rport ?? '', 10);
-  connection.publicAddress = { host: received, port: Number.isNaN(port) ? connection.localAddress.port : port };
+  const learned = { host: received, port: Number.isNaN(port) ? connection.localAddress.port : port };
+  const known = connection.publicAddress;
+  connection.publicAddress = learned;
+  return known?.host !== learned.host || known.port !== learned.port;
 }
 
 async function exchange(
@@ -200,23 +233,39 @@ async function exchange(
 
 /* ------------------------------------------------------------ interpreting */
 
-function grantedExpiry(response: SipResponse, requested: number): number {
+const leadingSeconds = (value: string | undefined): number | undefined => {
+  const digits = /^\s*(\d+)/.exec(value ?? '')?.[1];
+  return digits === undefined ? undefined : Number(digits);
+};
+
+/**
+ * What the registrar granted US. The Contact list holds every device bound to the account, so only the
+ * contact that is ours (RFC 3261 10.2.4: its own expires parameter beats the Expires header) may be read;
+ * the first contact in the list is as likely to be someone else's.
+ */
+function grantedExpiry(response: SipResponse, requested: number, owner: BindingOwner): number {
+  const ours = parseContactBindings(headerValues(response.headers, 'contact')).find((binding) => isOurBinding(binding, owner));
   const header = Number.parseInt(headerValue(response.headers, 'expires') ?? '', 10);
-  if (!Number.isNaN(header)) return header;
-  const contacts = headerValues(response.headers, 'contact');
-  const fromContact = contacts
-    .map((contact) => Number.parseInt(parseParameters(contact)['expires'] ?? '', 10))
-    .find((value) => !Number.isNaN(value));
-  return fromContact ?? requested;
+  return ours?.expires ?? (Number.isNaN(header) ? requested : header);
 }
 
 function accepted(response: SipResponse, requested: number, owner: BindingOwner): RegisterResult {
   const contacts = headerValues(response.headers, 'contact');
   return {
     ok: true,
-    expiresIn: grantedExpiry(response, requested),
+    expiresIn: grantedExpiry(response, requested, owner),
     sharing: analyseBindings(contacts, owner),
     otherContacts: otherBindings(contacts, owner).map((binding) => binding.uri)
+  };
+}
+
+/** Retry-After and Min-Expires, each only when numeric, for the retry policy. */
+function retryHints(response: SipResponse): { retryAfter?: number; minExpires?: number } {
+  const retryAfter = leadingSeconds(headerValue(response.headers, 'retry-after'));
+  const minExpires = leadingSeconds(headerValue(response.headers, 'min-expires'));
+  return {
+    ...(retryAfter === undefined ? {} : { retryAfter }),
+    ...(minExpires === undefined ? {} : { minExpires })
   };
 }
 
@@ -227,7 +276,7 @@ function toResult(response: SipResponse | undefined, requested: number, sent: Bi
   }
   if (response.status === 200) return accepted(response, requested, sent);
   const errorKey = STATUS_ERROR_KEYS[response.status] ?? ERROR_KEYS.rejected;
-  return { ok: false, status: response.status, errorKey };
+  return { ok: false, status: response.status, errorKey, ...retryHints(response) };
 }
 
 const isChallenge = (response: SipResponse | undefined): response is SipResponse =>

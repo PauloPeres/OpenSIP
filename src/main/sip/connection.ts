@@ -4,6 +4,7 @@ import { connect as netConnect } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import type { Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
+import { redactSipMessage } from '@core/diagnostics';
 import { extractMessages, parse, serialize } from '@core/sip';
 import type { SipMessage, SipTransport, TransportCandidate } from '@core/sip';
 import { log } from '../windows';
@@ -28,7 +29,16 @@ export interface WebSocketLike {
   close(): void;
 }
 
+/** A diagnostic the connection wants recorded; `params` are already redacted, so the receiver may store them as is. */
+export interface ConnectionNotice {
+  readonly level: 'debug';
+  readonly messageKey: string;
+  readonly params: Readonly<Record<string, string>>;
+}
+
 export interface ConnectionDeps {
+  /** Receives diagnostics about traffic the connection discards. Optional: the connection never depends on it. */
+  readonly onNotice?: (notice: ConnectionNotice) => void;
   readonly connectTimeoutMs?: number;
   /** Defaults to the runtime's global WebSocket, which Electron 33 (Node 20) does not provide. */
   readonly webSocket?: (new (url: string, protocols?: string | string[]) => WebSocketLike) | undefined;
@@ -36,6 +46,14 @@ export interface ConnectionDeps {
 
 /** A peer that never completes a message must not grow memory without bound. */
 export const MAX_BUFFER_BYTES = 64 * 1024;
+/**
+ * A hostile or broken peer could send thousands of bad datagrams a second, so unparsable ones are reported at
+ * most once per interval per connection (the first at once, later ones as a count). No timer is involved: the
+ * window is checked when the next bad datagram arrives, so an idle connection costs nothing.
+ */
+export const MALFORMED_REPORT_INTERVAL_MS = 10_000;
+/** Enough to recognise the start-line and first headers, little enough to keep the log readable. */
+const MALFORMED_PREFIX_CHARS = 120;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 const WS_LOCAL: { host: string; port: number } = { host: 'opensip.invalid', port: 5060 };
 
@@ -143,11 +161,40 @@ async function openStream(
   return wireStream(candidate, socket);
 }
 
-function parseDatagram(data: Buffer, hub: Hub): void {
+/** Only CR/LF: an RFC 5626 keepalive ping (`\r\n\r\n`) or its pong (`\r\n`). It is not a message, nor an error. */
+const isKeepalive = (text: string): boolean => /^[\r\n]+$/.test(text);
+
+/** Redacts first, then trims and makes control bytes visible, so no secret survives the cut. */
+function safePrefix(text: string): string {
+  return redactSipMessage(text)
+    .slice(0, MALFORMED_PREFIX_CHARS)
+    .replace(/[^\x20-\x7e]/g, (char) => (char === '\r' || char === '\n' ? ' ' : '.'));
+}
+
+type Reporter = (text: string, bytes: number, source: string) => void;
+
+function createMalformedReporter(onNotice: ConnectionDeps['onNotice']): Reporter {
+  const state = { last: Number.NEGATIVE_INFINITY, skipped: 0 };
+  return (text, bytes, source) => {
+    const now = Date.now();
+    if (onNotice === undefined || now - state.last < MALFORMED_REPORT_INTERVAL_MS) {
+      state.skipped += 1;
+      return;
+    }
+    const params = { source, bytes: String(bytes), skipped: String(state.skipped), prefix: safePrefix(text) };
+    state.last = now;
+    state.skipped = 0;
+    onNotice({ level: 'debug', messageKey: 'logs.event.datagramDropped', params });
+  };
+}
+
+function parseDatagram(data: Buffer, hub: Hub, report: Reporter, source: string): void {
+  const text = data.toString('utf8');
+  if (isKeepalive(text)) return;
   try {
-    hub.emit(parse(data.toString('utf8')));
+    hub.emit(parse(text));
   } catch {
-    // A malformed datagram is dropped: UDP is lossy by nature.
+    report(text, data.length, source);
   }
 }
 
@@ -199,14 +246,15 @@ function bindDatagram(socket: DgramSocket): Promise<void> {
  * 100 Trying would vanish. RFC 3261 matches responses by Via branch / Call-ID / CSeq, never by source,
  * so we bind, send with an explicit destination and accept datagrams from anywhere.
  */
-async function openDatagram(candidate: TransportCandidate): Promise<SipConnection> {
+async function openDatagram(candidate: TransportCandidate, deps: ConnectionDeps): Promise<SipConnection> {
   const address = await egressAddress(candidate);
   const socket = createSocket('udp4');
   const hub = createHub();
   const noteSource = noteForeignSource(candidate, new Set());
+  const report = createMalformedReporter(deps.onNotice);
   socket.on('message', (data, info) => {
     noteSource(info);
-    parseDatagram(data, hub);
+    parseDatagram(data, hub, report, `${info.address}:${info.port}`);
   });
   socket.on('error', (error) => hub.end(reasonOf(error)));
   socket.on('close', () => hub.end('closed'));
@@ -219,10 +267,12 @@ async function openDatagram(candidate: TransportCandidate): Promise<SipConnectio
   return assemble(candidate, { host: address, port }, hub, { write, destroy: () => socket.close() });
 }
 
-function wireWebSocket(candidate: TransportCandidate, socket: WebSocketLike): SipConnection {
+function wireWebSocket(candidate: TransportCandidate, socket: WebSocketLike, deps: ConnectionDeps): SipConnection {
   const hub = createHub();
+  const report = createMalformedReporter(deps.onNotice);
+  const source = `${candidate.host}:${candidate.port}`;
   socket.onmessage = (event): void => {
-    if (typeof event.data === 'string') parseDatagram(Buffer.from(event.data), hub);
+    if (typeof event.data === 'string') parseDatagram(Buffer.from(event.data), hub, report, source);
   };
   socket.onclose = (): void => hub.end('closed');
   socket.onerror = (): void => hub.end('websocket-error');
@@ -237,7 +287,7 @@ function openWebSocket(candidate: TransportCandidate, deps: ConnectionDeps): Pro
   const socket = new Ctor(`${scheme}://${candidate.host}:${candidate.port}`, 'sip');
   return new Promise((resolve, reject) => {
     socket.onerror = (): void => reject(new Error('websocket-error'));
-    socket.onopen = (): void => resolve(wireWebSocket(candidate, socket));
+    socket.onopen = (): void => resolve(wireWebSocket(candidate, socket, deps));
   });
 }
 
@@ -246,7 +296,7 @@ type Opener = (candidate: TransportCandidate, deps: ConnectionDeps) => Promise<S
 const OPENERS: Readonly<Record<SipTransport, Opener>> = {
   tcp: openStream,
   tls: openStream,
-  udp: (candidate) => openDatagram(candidate),
+  udp: openDatagram,
   ws: openWebSocket,
   wss: openWebSocket
 };

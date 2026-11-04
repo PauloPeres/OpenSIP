@@ -23,7 +23,8 @@ import {
   applyCallEvent,
   buildOffer,
   callsForAccount,
-  canRetry,
+  decideKeepalive,
+  decideRetry,
   emptyCallRegistry,
   headerValue,
   headerValues,
@@ -31,7 +32,10 @@ import {
   incomingCall,
   initialRegistration,
   isResponse,
+  keepalivePolicy,
   negotiate,
+  noteInbound,
+  noteSent,
   normaliseTarget,
   outgoingCall,
   parseSdp,
@@ -39,6 +43,7 @@ import {
   reduceRegistration,
   resumeDirection,
   serialize,
+  startKeepalive as freshKeepalive,
   withHeader
 } from '@core/sip';
 import type { AccountSharing } from '../../shared/api';
@@ -47,7 +52,9 @@ import type {
   CallEvent,
   CallRegistry,
   CallSession,
+  KeepaliveState,
   RegistrationEvent,
+  RegistrationFailure,
   RegistrationSnapshot,
   SdpDirection,
   SessionDescription,
@@ -65,7 +72,7 @@ import type { RtpSession, RtpSessionOptions } from '../media/rtp-session';
 import type { MediaBridge } from '../media/media-window';
 import { log } from '../windows';
 import { openConnection } from './connection';
-import type { SipConnection } from './connection';
+import type { ConnectionDeps, SipConnection } from './connection';
 import { defaultIdFactory } from './ids';
 import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
@@ -76,16 +83,21 @@ import {
   UDP_MAX_TRANSMISSIONS,
   UDP_TRANSACTION_TIMEOUT_MS,
   USER_AGENT,
+  buildOptionsRequest,
   credentialsFor,
+  learnPublicAddress,
   register,
   repeatsNonce
 } from './registrar';
-import type { AcceptedRegistration, Credentials } from './registrar';
+import type { AcceptedRegistration, Credentials, RegisterResult } from './registrar';
 
 const REFRESH_FRACTION = 0.9;
 const MIN_REFRESH_MS = 5_000;
-const RETRY_DELAY_MS = 30_000;
-const MAX_RETRIES = 3;
+/** How often the keepalive timer looks at the clocks; the policies in core/sip/keepalive.ts are multiples of it. */
+const KEEPALIVE_TICK_MS = 5_000;
+/** The error shown for a flow that stopped answering: the same wording as a REGISTER that timed out. */
+const TRANSPORT_FAILURE: RegistrationFailure = { kind: 'transport' };
+const DEAD_FLOW_KEY = 'registration.error.timeout';
 const UNREGISTER_TIMEOUT_MS = 1_500;
 const ALLOW = 'INVITE, ACK, CANCEL, BYE, OPTIONS';
 const SUPPORTED_CODECS: readonly number[] = [PCMU_PAYLOAD_TYPE, PCMA_PAYLOAD_TYPE];
@@ -179,6 +191,15 @@ export interface EngineDeps {
   readonly media: MediaBridge;
   readonly rtp: RtpFactory;
   readonly now: () => number;
+  /** In [0, 1); injected so the jitter of the retry backoff is testable. */
+  readonly random: () => number;
+}
+
+/** The ping timer of a registered flow and the two clocks the core reducer decides from. */
+interface Keepalive {
+  state: KeepaliveState;
+  readonly timer: ReturnType<typeof setInterval>;
+  cseq: number;
 }
 
 interface Entry {
@@ -191,6 +212,13 @@ interface Entry {
   /** What the last REGISTER 200 said about other devices, and its change-detection key. */
   sharing: AccountSharing | undefined;
   sharingKey: string | undefined;
+  /** Failures in a row since the last success; drives the retry backoff. */
+  failures: number;
+  /** 423 answers in a row, so a server whose Min-Expires keeps climbing cannot loop us. */
+  raises: number;
+  /** An Expires the registrar insisted on (423 Min-Expires), kept for every later refresh. */
+  expires: number | undefined;
+  keepalive: Keepalive | undefined;
 }
 
 interface MediaPlan {
@@ -252,6 +280,8 @@ interface Dialog {
   media: LiveMedia | undefined;
   pending: Pending | undefined;
   setup: SetupGuard | undefined;
+  /** The host our last SDP carried, to notice when the mapped address has since changed. */
+  advertised: string;
   held: boolean;
   muted: boolean;
   cancelled: boolean;
@@ -485,11 +515,25 @@ const defaultDeps = (): EngineDeps => ({
   diagnostics: createDiagnosticsLog(),
   media: noMedia,
   rtp: defaultRtp,
-  now: () => Date.now()
+  now: () => Date.now(),
+  random: () => Math.random()
 });
 
 const technical = (error: unknown): string =>
   (error as { code?: string } | null)?.code ?? (error instanceof Error ? error.message : String(error));
+
+/** What the retry policy needs to know about a REGISTER that was refused. */
+function failureOf(result: Extract<RegisterResult, { ok: false }>, requested: number, raises: number): RegistrationFailure {
+  const { status, retryAfter, minExpires } = result;
+  return {
+    kind: 'response',
+    status,
+    requested,
+    raises,
+    ...(retryAfter === undefined ? {} : { retryAfter }),
+    ...(minExpires === undefined ? {} : { minExpires })
+  };
+}
 
 const fail = (errorKey: string): DialResult => ({ ok: false, errorKey });
 
@@ -528,6 +572,14 @@ function viewOf(call: CallSession, dialog: Dialog | undefined, track?: CallTrack
   };
 }
 
+/** Every engine that has been created and not stopped, so the main process can wake them without owning one. */
+const liveEngines = new Set<SipEngine>();
+
+/** The machine resumed or was unlocked: every live engine re-registers what it holds, if anything. */
+export function resumeAllEngines(): void {
+  liveEngines.forEach((engine) => engine.reregisterAll());
+}
+
 export class SipEngine {
   private readonly entries = new Map<AccountId, Entry>();
   private readonly dialogs = new Map<string, Dialog>();
@@ -542,6 +594,7 @@ export class SipEngine {
     this.stopCapture = this.deps.media.onCapture((callId, samples) =>
       this.dialogs.get(callId)?.media?.session.sendPcm(samples)
     );
+    liveEngines.add(this);
   }
 
   onChange(listener: Listener): () => void {
@@ -632,6 +685,7 @@ export class SipEngine {
   async stop(): Promise<void> {
     await Promise.all([...this.entries.keys()].map((id) => this.stopAccount(id)));
     this.stopCapture();
+    liveEngines.delete(this);
   }
 
   /** Returns once the account is registering; discovery and REGISTER continue in the background. */
@@ -645,7 +699,11 @@ export class SipEngine {
       timer: undefined,
       stopped: false,
       sharing: undefined,
-      sharingKey: undefined
+      sharingKey: undefined,
+      failures: 0,
+      raises: 0,
+      expires: undefined,
+      keepalive: undefined
     };
     this.entries.set(account.id, entry);
     this.dispatchRegistration(entry, { type: 'register' });
@@ -732,6 +790,7 @@ export class SipEngine {
     const uri = this.normalise(target, entry.account.domain);
     if (uri === undefined) return fail('calls.error.invalidTarget');
     if (Object.values(this.registry).some((call) => isOutboundInSetup(call, accountId))) return fail(SETUP_IN_PROGRESS_KEY);
+    this.warnIfUnmapped(entry, entry.connection);
     const callId = this.deps.ids.newCallId(reachableAt(entry.connection).host);
     this.forgetFinished(accountId);
     const refusal = this.openOutgoing({ id: callId, accountId, target: uri });
@@ -782,10 +841,12 @@ export class SipEngine {
     const party: InviteParty = { entry, callId, target: uri, localHeader: localHeaderOf(entry, localTag) };
     const invite = buildInvite(party, 1, this.deps.ids.newBranch(), body);
     const remoteHeader = `<${uri}>`;
-    return this.newDialog({
+    const dialog = this.newDialog({
       entry, role: 'uac', callId, invite, localTag, sdpSession, remoteHeader,
       target: uri, routes: [], direction: 'sendrecv', plan: undefined, rtpPort
     });
+    dialog.advertised = address;
+    return dialog;
   }
 
   private sessionId(): string {
@@ -898,6 +959,7 @@ export class SipEngine {
     if (!this.dispatchCall(dialog.callId, { type: 'connected' })) return;
     this.setProgress(dialog.callId, PROGRESS_CONNECTING);
     this.startMedia(dialog);
+    this.reofferStale(dialog.entry);
   }
 
   /** A 2xx we cannot use, or one that crossed our CANCEL: acknowledge it, then hang up at once. */
@@ -1002,8 +1064,9 @@ export class SipEngine {
   }
 
   private sdpFor(dialog: Dialog, direction: SdpDirection): string {
+    dialog.advertised = this.hostOf(dialog);
     return buildOffer({
-      address: this.hostOf(dialog),
+      address: dialog.advertised,
       port: dialog.rtpPort,
       sessionId: dialog.sdpSession,
       direction,
@@ -1044,6 +1107,7 @@ export class SipEngine {
     const send = connection.send.bind(connection);
     connection.send = (message): Promise<void> => {
       this.traceSent(entry, message);
+      this.noteTraffic(entry, noteSent);
       return send(message);
     };
   }
@@ -1058,9 +1122,11 @@ export class SipEngine {
       if (entry.stopped) return;
       entry.candidate = candidate;
       this.note(entry.account.id, 'logs.event.transport', { params: { transport: candidate.transport } });
-      await this.attach(entry, await this.deps.open(candidate));
+      const onNotice: ConnectionDeps['onNotice'] = ({ level, messageKey, params }) =>
+        this.note(entry.account.id, messageKey, { level, params });
+      await this.attach(entry, await this.deps.open(candidate, { onNotice }));
     } catch (error) {
-      this.fail(entry, this.failureKey(error), true);
+      this.fail(entry, this.failureKey(error), TRANSPORT_FAILURE);
     }
   }
 
@@ -1097,15 +1163,16 @@ export class SipEngine {
   private async refresh(entry: Entry): Promise<void> {
     const { connection, candidate, account } = entry;
     if (connection === undefined || candidate === undefined) return;
-    const params = { account, candidate, expires: account.registerExpires };
-    const known = connection.publicAddress;
-    const result = await register(params, { connection, ids: this.deps.ids, hash: md5 });
+    const requested = entry.expires ?? account.registerExpires;
+    const result = await register({ account, candidate, expires: requested }, { connection, ids: this.deps.ids, hash: md5 });
     if (entry.stopped || entry.connection !== connection) return;
-    this.noteMappedAddress(entry, known, connection.publicAddress);
-    if (!result.ok) return this.fail(entry, result.errorKey, result.status === 408);
+    if (!result.ok) return this.fail(entry, result.errorKey, failureOf(result, requested, entry.raises));
+    entry.failures = 0;
+    entry.raises = 0;
     this.note(account.id, 'logs.event.registered', { params: { expires: String(result.expiresIn) } });
     this.trackSharing(entry, result);
     if (entry.snapshot.state === 'registering') this.dispatchRegistration(entry, { type: 'registered' });
+    this.beginKeepalive(entry);
     const delay = Math.max(MIN_REFRESH_MS, Math.floor(result.expiresIn * REFRESH_FRACTION * 1000));
     entry.timer = setTimeout(() => void this.refresh(entry), delay);
   }
@@ -1132,16 +1199,33 @@ export class SipEngine {
     this.note(entry.account.id, 'logs.event.nat', { params: { address: `${after.host}:${after.port}` } });
   }
 
-  private fail(entry: Entry, reason: string, retryable: boolean): void {
+  /**
+   * Whether and when to try again is core/sip/retry.ts's decision. A 423 is not a failure at all: the
+   * registrar named the shortest Expires it accepts, so register again with that.
+   */
+  private fail(entry: Entry, reason: string, failure: RegistrationFailure): void {
     if (entry.stopped) return;
+    const decision = decideRetry(failure, entry.failures + 1, this.deps.random());
+    if (decision.action === 'reregister') return this.raiseExpires(entry, decision.expires);
+    entry.failures += 1;
     this.forgetSharing(entry);
     this.clearTimer(entry);
     this.dropConnection(entry);
     this.dispatchRegistration(entry, { type: 'failed', reason });
-    if (retryable && canRetry(entry.snapshot, MAX_RETRIES)) {
-      this.note(entry.account.id, 'logs.event.retry', { params: { seconds: String(RETRY_DELAY_MS / 1000) } });
-      entry.timer = setTimeout(() => this.retry(entry), RETRY_DELAY_MS);
-    }
+    if (decision.action === 'retry') this.scheduleRetry(entry, decision.delayMs);
+  }
+
+  private scheduleRetry(entry: Entry, delayMs: number): void {
+    this.note(entry.account.id, 'logs.event.retry', { params: { seconds: String(Math.ceil(delayMs / 1000)) } });
+    entry.timer = setTimeout(() => this.retry(entry), delayMs);
+  }
+
+  private raiseExpires(entry: Entry, expires: number): void {
+    entry.expires = expires;
+    entry.raises += 1;
+    this.note(entry.account.id, 'logs.event.minExpires', { params: { expires: String(expires) } });
+    this.clearTimer(entry);
+    void this.refresh(entry);
   }
 
   private retry(entry: Entry): void {
@@ -1153,7 +1237,80 @@ export class SipEngine {
   private onClosed(entry: Entry, connection: SipConnection, reason: string): void {
     if (entry.stopped || entry.connection !== connection) return;
     log('warn', `connection closed: ${reason}`);
-    this.fail(entry, reason, true);
+    this.fail(entry, reason, TRANSPORT_FAILURE);
+  }
+
+  /* ------------------------------------------------- wake from sleep */
+
+  /**
+   * The machine woke up (or was unlocked): NAT bindings made before the sleep are gone and TCP connections
+   * are probably dead, so do not wait for the refresh timer. A registered account refreshes on its current
+   * connection (a dead one fails that REGISTER and is replaced through the normal retry path); one waiting
+   * out a backoff retries now. A terminally failed account, and one still registering, are left alone.
+   */
+  reregisterAll(): void {
+    const awake = [...this.entries.values()].filter((entry) => this.wake(entry));
+    if (awake.length > 0) log('info', `resumed: re-registering ${awake.length} account(s)`);
+  }
+
+  private wake(entry: Entry): boolean {
+    const { state } = entry.snapshot;
+    const waiting = state === 'failed' && entry.timer !== undefined;
+    if (entry.stopped || (state !== 'registered' && !waiting)) return false;
+    this.note(entry.account.id, 'logs.event.resumed');
+    this.clearTimer(entry);
+    entry.failures = 0;
+    if (entry.keepalive !== undefined) entry.keepalive.state = freshKeepalive(this.deps.now());
+    if (waiting) this.retry(entry);
+    else void this.refresh(entry);
+    return true;
+  }
+
+  /* ----------------------------------------- keepalive, dead flow */
+
+  /**
+   * Pings the server while registered. Outbound traffic keeps the NAT binding open; inbound traffic, of any
+   * kind (a response to our ping, the server's own CRLF pings once the connection surfaces them), is the
+   * evidence that the path still works. The decisions are core/sip/keepalive.ts's; this owns the timer.
+   */
+  private beginKeepalive(entry: Entry): void {
+    if (entry.keepalive !== undefined) return;
+    const timer = setInterval(() => this.tickKeepalive(entry), KEEPALIVE_TICK_MS);
+    entry.keepalive = { state: freshKeepalive(this.deps.now()), timer, cseq: 0 };
+  }
+
+  private endKeepalive(entry: Entry): void {
+    if (entry.keepalive !== undefined) clearInterval(entry.keepalive.timer);
+    entry.keepalive = undefined;
+  }
+
+  private tickKeepalive(entry: Entry): void {
+    const { keepalive, connection } = entry;
+    if (keepalive === undefined || connection === undefined) return;
+    const action = decideKeepalive(keepalive.state, this.deps.now(), keepalivePolicy(connection.candidate.transport));
+    if (action === 'ping') this.ping(entry, connection, keepalive);
+    else if (action === 'dead') this.declareDead(entry);
+  }
+
+  private ping(entry: Entry, connection: SipConnection, keepalive: Keepalive): void {
+    keepalive.cseq += 1;
+    const { account } = entry;
+    const request = buildOptionsRequest(
+      { account, candidate: connection.candidate, expires: 0, localAddress: connection.localAddress },
+      this.deps.ids,
+      keepalive.cseq
+    );
+    connection.send(request).catch(() => undefined);
+  }
+
+  private declareDead(entry: Entry): void {
+    this.note(entry.account.id, 'logs.event.deadFlow', { level: 'warn' });
+    this.fail(entry, DEAD_FLOW_KEY, TRANSPORT_FAILURE);
+  }
+
+  private noteTraffic(entry: Entry, update: (state: KeepaliveState, now: number) => KeepaliveState): void {
+    const { keepalive } = entry;
+    if (keepalive !== undefined) keepalive.state = update(keepalive.state, this.deps.now());
   }
 
   private async unregister(entry: Entry): Promise<void> {
@@ -1167,6 +1324,7 @@ export class SipEngine {
   private dropConnection(entry: Entry): void {
     const { connection } = entry;
     entry.connection = undefined;
+    this.endKeepalive(entry);
     connection?.close();
     this.endCallsOf(entry.account.id);
   }
@@ -1199,9 +1357,39 @@ export class SipEngine {
 
   private onMessage(entry: Entry, message: SipRequest | SipResponse): void {
     if (entry.stopped) return;
+    this.noteTraffic(entry, noteInbound);
     this.traceReceived(entry, message);
-    if (isResponse(message)) this.onResponse(entry, message);
-    else this.onRequest(entry, message);
+    if (!isResponse(message)) return this.onRequest(entry, message);
+    this.learnMapping(entry, message);
+    this.onResponse(entry, message);
+  }
+
+  /**
+   * Every response carries the address the server sees (RFC 3581), not only a REGISTER answer, so the 100 Trying
+   * of an INVITE is enough to correct an offer that went out before registration had reported it.
+   */
+  private learnMapping(entry: Entry, response: SipResponse): void {
+    const { connection } = entry;
+    if (connection === undefined) return;
+    const before = connection.publicAddress;
+    if (learnPublicAddress(connection, response)) this.noteMappedAddress(entry, before, connection.publicAddress);
+    this.reofferStale(entry);
+  }
+
+  /** A confirmed call whose SDP names a host that is no longer our reachable one gets a fresh offer. */
+  private reofferStale(entry: Entry): void {
+    for (const dialog of this.dialogs.values()) {
+      const stale = dialog.entry === entry && dialog.stage === 'confirmed' && dialog.pending === undefined;
+      if (stale && dialog.advertised !== this.hostOf(dialog)) {
+        this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction)).catch(this.logSend);
+      }
+    }
+  }
+
+  /** Registered yet no mapping reported: the server does not echo `received`, so say so rather than fail the call. */
+  private warnIfUnmapped(entry: Entry, connection: SipConnection): void {
+    if (connection.publicAddress !== undefined) return;
+    this.note(entry.account.id, 'logs.event.natUnknown', { level: 'warn', params: { address: connection.localAddress.host } });
   }
 
   private onResponse(entry: Entry, response: SipResponse): void {
@@ -1345,6 +1533,7 @@ export class SipEngine {
       media: undefined,
       pending: undefined,
       setup: undefined,
+      advertised: '',
       held: false,
       muted: false,
       cancelled: false,

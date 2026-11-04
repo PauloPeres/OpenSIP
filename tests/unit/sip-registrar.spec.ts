@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAuthorization, createAccount, parseChallenge, serialize } from '../../src/core/sip';
 import type { SipAccount, SipMessage, SipRequest, SipResponse, TransportCandidate } from '../../src/core/sip';
 import type { IdFactory } from '../../src/main/sip/ids';
-import { MAX_AUTH_ATTEMPTS, buildRegisterRequest, register } from '../../src/main/sip/registrar';
+import { MAX_AUTH_ATTEMPTS, buildOptionsRequest, buildRegisterRequest, register } from '../../src/main/sip/registrar';
 import type { RegisterParams } from '../../src/main/sip/registrar';
 import type { SipConnection } from '../../src/main/sip/connection';
 
@@ -534,5 +534,104 @@ describe('User-Agent override (OPENSIP_USER_AGENT)', () => {
     const { resolveUserAgent } = await import('../../src/main/sip/user-agent');
     expect(resolveUserAgent({})).toBe('OpenSIPPhone/0.1.0');
     expect(resolveUserAgent({ OPENSIP_USER_AGENT: '  X/1  ' })).toBe('X/1');
+  });
+});
+
+describe('grantedExpiry with several devices on the account', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const ours = '<sip:1001@10.0.0.5:51234;transport=tcp>';
+  const theirs = '<sip:1001@203.0.113.7:5070;transport=udp>';
+  const run = (contact: string[], extra: Record<string, string[]> = {}) =>
+    register(params(), { connection: fakeConnection((request) => reply(request, 200, { contact, ...extra })), ids: sequentialIds(), hash: md5 });
+
+  it('reads OUR contact expires even when another device is listed first', async () => {
+    await expect(run([`${theirs};expires=3600`, `${ours};expires=240`])).resolves.toMatchObject({ expiresIn: 240 });
+  });
+
+  it('reads ours when both are in one comma separated header', async () => {
+    await expect(run([`${theirs};expires=3600, ${ours};expires=120`])).resolves.toMatchObject({ expiresIn: 120 });
+  });
+
+  it('never adopts another device expiry: falls back to the Expires header, then to what we asked for', async () => {
+    await expect(run([`${theirs};expires=3600`], { expires: ['300'] })).resolves.toMatchObject({ expiresIn: 300 });
+    await expect(run([`${theirs};expires=3600`])).resolves.toMatchObject({ expiresIn: 600 });
+  });
+
+  it('falls back when our contact carries no expires', async () => {
+    await expect(run([`${theirs};expires=3600`, ours], { expires: ['200'] })).resolves.toMatchObject({ expiresIn: 200 });
+  });
+
+  it('prefers our contact expires over the Expires header, as RFC 3261 10.2.4 says', async () => {
+    await expect(run([`${ours};expires=240`], { expires: ['300'] })).resolves.toMatchObject({ expiresIn: 240 });
+  });
+
+  it('matches our contact at the NAT-mapped address when one is known', async () => {
+    const mapped = '<sip:1001@203.0.113.91:61878;transport=tcp>;expires=90';
+    const connection = fakeConnection((request) => reply(request, 200, { contact: [`${theirs};expires=3600`, mapped] }));
+    connection.publicAddress = { host: '203.0.113.91', port: 61878 };
+    const result = await register(params(), { connection, ids: sequentialIds(), hash: md5 });
+    expect(result).toMatchObject({ expiresIn: 90 });
+  });
+});
+
+describe('failure details for the retry policy', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const fail = (status: number, extra: Record<string, string[]>) =>
+    register(params(), { connection: fakeConnection((request) => reply(request, status, extra)), ids: sequentialIds(), hash: md5 });
+
+  it('carries Retry-After in seconds, ignoring a trailing comment or parameter', async () => {
+    await expect(fail(503, { 'retry-after': ['120'] })).resolves.toMatchObject({ ok: false, status: 503, retryAfter: 120 });
+    await expect(fail(503, { 'retry-after': ['30 (maintenance);duration=60'] })).resolves.toMatchObject({ retryAfter: 30 });
+  });
+
+  it('carries Min-Expires', async () => {
+    await expect(fail(423, { 'min-expires': ['3600'] })).resolves.toMatchObject({ ok: false, status: 423, minExpires: 3600 });
+  });
+
+  it('omits both when absent or not a number', async () => {
+    const absent = await fail(503, {});
+    expect(absent).not.toHaveProperty('retryAfter');
+    expect(absent).not.toHaveProperty('minExpires');
+    const junk = await fail(503, { 'retry-after': ['Fri, 13 Nov 2026 10:00:00 GMT'], 'min-expires': ['soon'] });
+    expect(junk).not.toHaveProperty('retryAfter');
+    expect(junk).not.toHaveProperty('minExpires');
+  });
+
+  it('reports a repeated-nonce failure as 401 so the policy treats it as terminal', async () => {
+    const connection = fakeConnection((request) => reply(request, 401, { 'www-authenticate': [CHALLENGE] }));
+    await expect(register(params(), { connection, ids: sequentialIds(), hash: md5 })).resolves.toMatchObject({
+      ok: false,
+      status: 401,
+      errorKey: 'registration.error.unauthorized'
+    });
+  });
+});
+
+describe('buildOptionsRequest (keepalive ping)', () => {
+  it('serialises to the exact expected bytes', () => {
+    const request = buildOptionsRequest(params('udp'), sequentialIds(), 7);
+    expect(serialize(request)).toBe(
+      [
+        'OPTIONS sip:pbx.example.com SIP/2.0',
+        'Via: SIP/2.0/UDP 10.0.0.5:51234;branch=z9hG4bKbranch1;rport',
+        'Max-Forwards: 70',
+        'From: <sip:1001@pbx.example.com>;tag=tag1',
+        'To: <sip:pbx.example.com>',
+        'Call-ID: call1@10.0.0.5',
+        'CSeq: 7 OPTIONS',
+        'User-Agent: OpenSIPPhone/0.1.0',
+        'Content-Length: 0',
+        '',
+        ''
+      ].join('\r\n')
+    );
+  });
+
+  it('advertises the transport of the candidate', () => {
+    expect(buildOptionsRequest(params('tls'), sequentialIds(), 1).headers['via']?.[0]).toContain('SIP/2.0/TLS');
   });
 });

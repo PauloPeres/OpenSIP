@@ -8,3 +8,5 @@ export * from './transport';
 export * from './message';
 export * from './digest';
 export * from './bindings';
+export * from './retry';
+export * from './keepalive';

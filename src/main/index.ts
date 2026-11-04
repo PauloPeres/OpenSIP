@@ -1,6 +1,7 @@
-import { app, BrowserWindow, session } from 'electron';
+import { app, BrowserWindow, powerMonitor, session } from 'electron';
 import type { WebContents } from 'electron';
 import { registerIpc } from './ipc';
+import { resumeAllEngines } from './sip/engine';
 import { initUpdater } from './updater';
 import { createMainWindow, isMediaWebContents, log } from './windows';
 
@@ -62,11 +63,18 @@ function hasMainWindow(): boolean {
   return BrowserWindow.getAllWindows().some((window) => !isMediaWebContents(window.webContents));
 }
 
+/** After sleep or a screen lock the NAT bindings are stale: register again now, not at the next refresh. */
+function reregisterOnWake(): void {
+  powerMonitor.on('resume', resumeAllEngines);
+  powerMonitor.on('unlock-screen', resumeAllEngines);
+}
+
 async function bootstrap(): Promise<void> {
   await app.whenReady();
   applyCsp();
   allowMicrophone();
   await registerIpc();
+  reregisterOnWake();
   initUpdater();
   openMainWindow();
   app.on('activate', () => {
