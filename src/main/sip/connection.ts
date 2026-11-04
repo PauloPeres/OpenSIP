@@ -12,7 +12,17 @@ import { log } from '../windows';
 export interface SipConnection {
   send(message: SipMessage): Promise<void>;
   onMessage(listener: (message: SipMessage) => void): () => void;
+  /**
+   * Fires for EVERY inbound datagram or stream chunk, before it is parsed: a CRLF ping, a partial message and
+   * a datagram that fails to parse are all packets, and liveness is about packets, not well-formed SIP.
+   */
+  onActivity(listener: () => void): () => void;
   onClose(listener: (reason: string) => void): () => void;
+  /**
+   * Sends the RFC 5626 CRLF ping (`\r\n\r\n`) and nothing else. Rejects with `keepalive-unsupported` over
+   * WebSocket, where the keepalive is protocol-level and the caller sends a request instead.
+   */
+  sendKeepalive(): Promise<void>;
   close(): void;
   readonly candidate: TransportCandidate;
   readonly localAddress: { host: string; port: number };
@@ -59,35 +69,55 @@ const WS_LOCAL: { host: string; port: number } = { host: 'opensip.invalid', port
 
 interface Hub {
   readonly emit: (message: SipMessage) => void;
+  readonly touch: () => void;
+  readonly onActivity: SipConnection['onActivity'];
   readonly end: (reason: string) => void;
   readonly onMessage: SipConnection['onMessage'];
   readonly onClose: SipConnection['onClose'];
 }
 
-function createHub(): Hub {
-  const messages = new Set<(message: SipMessage) => void>();
-  const closers = new Set<(reason: string) => void>();
-  const state = { ended: false };
-  const subscribe = <T>(set: Set<T>, listener: T): (() => void) => {
-    set.add(listener);
-    return () => set.delete(listener);
-  };
+function subscribers<T>(): { readonly add: (listener: T) => () => void; readonly each: (call: (listener: T) => void) => void } {
+  const set = new Set<T>();
   return {
-    emit: (message) => messages.forEach((listener) => listener(message)),
+    add: (listener) => {
+      set.add(listener);
+      return () => set.delete(listener);
+    },
+    each: (call) => set.forEach(call)
+  };
+}
+
+function createHub(): Hub {
+  const messages = subscribers<(message: SipMessage) => void>();
+  const closers = subscribers<(reason: string) => void>();
+  const activity = subscribers<() => void>();
+  const state = { ended: false };
+  return {
+    emit: (message) => messages.each((listener) => listener(message)),
+    touch: () => activity.each((listener) => listener()),
+    onActivity: activity.add,
     end: (reason): void => {
       if (state.ended) return;
       state.ended = true;
-      closers.forEach((listener) => listener(reason));
+      closers.each((listener) => listener(reason));
     },
-    onMessage: (listener) => subscribe(messages, listener),
-    onClose: (listener) => subscribe(closers, listener)
+    onMessage: messages.add,
+    onClose: closers.add
   };
 }
+
+/** RFC 5626 section 3.5.1 / 4.4.1: a double CRLF is the ping, a single CRLF its answer. */
+const PING = '\r\n\r\n';
+const PONG = '\r\n';
 
 interface Io {
   readonly write: (text: string) => Promise<void>;
   readonly destroy: () => void;
+  /** False where a CRLF keepalive is not valid (WebSocket). */
+  readonly keepalive: boolean;
 }
+
+const unsupported = (): Promise<void> => Promise.reject(new Error('keepalive-unsupported'));
 
 function assemble(
   candidate: TransportCandidate,
@@ -100,7 +130,9 @@ function assemble(
     localAddress,
     onMessage: hub.onMessage,
     onClose: hub.onClose,
+    onActivity: hub.onActivity,
     send: (message) => io.write(serialize(message)),
+    sendKeepalive: () => (io.keepalive ? io.write(PING) : unsupported()),
     close: (): void => {
       io.destroy();
       hub.end('closed');
@@ -126,16 +158,19 @@ const reasonOf = (error: Error): string => (error as { code?: string }).code ?? 
 function wireStream(candidate: TransportCandidate, socket: Socket): SipConnection {
   const hub = createHub();
   const state = { buffer: '' };
+  const write = (text: string): Promise<void> =>
+    new Promise((resolve, reject) => socket.write(text, (error) => (error ? reject(error) : resolve())));
+  const pong = (): void => void write(PONG).catch(() => undefined);
   socket.setEncoding('utf8');
   socket.on('data', (chunk: string) => {
+    hub.touch();
+    if (state.buffer === '' && isPing(chunk)) pong();
     state.buffer = ingest(state.buffer + chunk, hub, socket);
   });
   socket.on('error', (error) => hub.end(reasonOf(error)));
   socket.on('close', () => hub.end('closed'));
   const local = { host: socket.localAddress ?? '0.0.0.0', port: socket.localPort ?? 0 };
-  const write = (text: string): Promise<void> =>
-    new Promise((resolve, reject) => socket.write(text, (error) => (error ? reject(error) : resolve())));
-  return assemble(candidate, local, hub, { write, destroy: () => socket.destroy() });
+  return assemble(candidate, local, hub, { write, destroy: () => socket.destroy(), keepalive: true });
 }
 
 function whenReady(socket: Socket, readyEvent: string, timeoutMs: number): Promise<void> {
@@ -164,6 +199,9 @@ async function openStream(
 /** Only CR/LF: an RFC 5626 keepalive ping (`\r\n\r\n`) or its pong (`\r\n`). It is not a message, nor an error. */
 const isKeepalive = (text: string): boolean => /^[\r\n]+$/.test(text);
 
+/** A ping is a keepalive of at least a double CRLF; a lone CRLF is the pong, which is never answered. */
+const isPing = (text: string): boolean => text.length >= PING.length && isKeepalive(text);
+
 /** Redacts first, then trims and makes control bytes visible, so no secret survives the cut. */
 function safePrefix(text: string): string {
   return redactSipMessage(text)
@@ -188,9 +226,10 @@ function createMalformedReporter(onNotice: ConnectionDeps['onNotice']): Reporter
   };
 }
 
-function parseDatagram(data: Buffer, hub: Hub, report: Reporter, source: string): void {
+function parseDatagram(data: Buffer, hub: Hub, report: Reporter, source: string, pong?: () => void): void {
+  hub.touch();
   const text = data.toString('utf8');
-  if (isKeepalive(text)) return;
+  if (isKeepalive(text)) return void (isPing(text) && pong?.());
   try {
     hub.emit(parse(text));
   } catch {
@@ -239,6 +278,13 @@ function bindDatagram(socket: DgramSocket): Promise<void> {
   });
 }
 
+function datagramWriter(socket: DgramSocket, candidate: TransportCandidate): Io['write'] {
+  return (text) =>
+    new Promise((resolve, reject) =>
+      socket.send(text, candidate.port, candidate.host, (error) => (error ? reject(error) : resolve()))
+    );
+}
+
 /**
  * The socket is deliberately NOT connect()ed. A connected UDP socket makes the kernel drop every datagram
  * whose source differs from the connected peer, but a SIP proxy routinely answers from another port,
@@ -252,19 +298,17 @@ async function openDatagram(candidate: TransportCandidate, deps: ConnectionDeps)
   const hub = createHub();
   const noteSource = noteForeignSource(candidate, new Set());
   const report = createMalformedReporter(deps.onNotice);
+  const write = datagramWriter(socket, candidate);
+  const pong = (): void => void write(PONG).catch(() => undefined);
   socket.on('message', (data, info) => {
     noteSource(info);
-    parseDatagram(data, hub, report, `${info.address}:${info.port}`);
+    parseDatagram(data, hub, report, `${info.address}:${info.port}`, pong);
   });
   socket.on('error', (error) => hub.end(reasonOf(error)));
   socket.on('close', () => hub.end('closed'));
   await bindDatagram(socket);
   const { port } = socket.address();
-  const write = (text: string): Promise<void> =>
-    new Promise((resolve, reject) =>
-      socket.send(text, candidate.port, candidate.host, (error) => (error ? reject(error) : resolve()))
-    );
-  return assemble(candidate, { host: address, port }, hub, { write, destroy: () => socket.close() });
+  return assemble(candidate, { host: address, port }, hub, { write, destroy: () => socket.close(), keepalive: true });
 }
 
 function wireWebSocket(candidate: TransportCandidate, socket: WebSocketLike, deps: ConnectionDeps): SipConnection {
@@ -273,11 +317,12 @@ function wireWebSocket(candidate: TransportCandidate, socket: WebSocketLike, dep
   const source = `${candidate.host}:${candidate.port}`;
   socket.onmessage = (event): void => {
     if (typeof event.data === 'string') parseDatagram(Buffer.from(event.data), hub, report, source);
+    else hub.touch();
   };
   socket.onclose = (): void => hub.end('closed');
   socket.onerror = (): void => hub.end('websocket-error');
   const write = async (text: string): Promise<void> => socket.send(text);
-  return assemble(candidate, WS_LOCAL, hub, { write, destroy: () => socket.close() });
+  return assemble(candidate, WS_LOCAL, hub, { write, destroy: () => socket.close(), keepalive: false });
 }
 
 function openWebSocket(candidate: TransportCandidate, deps: ConnectionDeps): Promise<SipConnection> {

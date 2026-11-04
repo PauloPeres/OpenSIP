@@ -14,7 +14,12 @@ class Link {
   readonly sent: SipMessage[] = [];
   private readonly handlers: ((m: SipMessage) => void)[] = [];
   private readonly closers: ((reason: string) => void)[] = [];
+  private readonly listeners: (() => void)[] = [];
   closed = false;
+  /** How many CRLF pings were put on the wire. */
+  keepalives = 0;
+  /** True while the server stays silent: it neither answers pings nor sends any of its own. */
+  quiet: () => boolean = () => false;
   respond: (m: SipRequest) => SipResponse[] = () => [];
   readonly connection: SipConnection;
 
@@ -27,11 +32,15 @@ class Link {
         if (m.kind === 'request') for (const r of this.respond(m)) queueMicrotask(() => this.inject(r));
       },
       onMessage: (l) => { this.handlers.push(l); return () => undefined; },
+      onActivity: (l) => { this.listeners.push(l); return () => undefined; },
+      sendKeepalive: async () => { this.keepalives += 1; if (!this.quiet()) queueMicrotask(() => this.hear()); },
       onClose: (l) => { this.closers.push(l); return () => undefined; },
       close: () => { this.closed = true; }
     } as SipConnection;
   }
-  inject(m: SipMessage): void { this.handlers.forEach((h) => h(m)); }
+  inject(m: SipMessage): void { this.hear(); this.handlers.forEach((h) => h(m)); }
+  /** A packet that is not a SIP message at all: the server's CRLF ping, or a datagram that failed to parse. */
+  hear(): void { this.listeners.forEach((l) => l()); }
   drop(reason = 'ECONNRESET'): void { this.closers.forEach((c) => c(reason)); }
   requests(method: string): SipRequest[] { return this.sent.filter((m): m is SipRequest => m.kind === 'request' && m.method === method); }
 }
@@ -48,10 +57,23 @@ function reply(req: SipRequest, status: number, extra: Record<string, string[]> 
   };
 }
 
+const SDP = ['v=0', 'o=- 1 1 IN IP4 203.0.113.9', 's=-', 'c=IN IP4 203.0.113.9', 't=0 0', 'm=audio 40000 RTP/AVP 8 101', 'a=rtpmap:8 PCMA/8000', 'a=rtpmap:101 telephone-event/8000', 'a=sendrecv', ''].join('\r\n');
+
+function answerInvite(m: SipRequest): SipResponse {
+  const to = headerValue(m.headers, 'to') ?? '';
+  const answered = reply(m, 200, { to: [`${to};tag=pbx1`], 'content-type': ['application/sdp'] });
+  return { ...answered, body: SDP };
+}
+
+/** The inbound RTP packet count the fake media session reports; a test moves it to stand for audio arriving. */
+const media = { rx: 0 };
+
+type ScriptedRig = Rig & { script: { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean } };
+
 interface Rig { engine: SipEngine; links: Link[]; diagnostics: ReturnType<typeof createDiagnosticsLog>; opens: () => number; failOpen: { next: boolean } }
 
-/** Every REGISTER gets `registerStatus`; OPTIONS gets 200 unless `quiet` is set. */
-const rig = (transport: TransportCandidate['transport'] = 'tcp'): Rig & { script: { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean } } => {
+/** Every REGISTER gets `registerStatus`; a ping is answered, and OPTIONS gets 200, unless `quiet` is set. */
+const rig = (transport: TransportCandidate['transport'] = 'tcp'): ScriptedRig => {
   const links: Link[] = [];
   const failOpen = { next: false };
   // Annotated so an override may take the attempt count; the default ignores it.
@@ -67,13 +89,21 @@ const rig = (transport: TransportCandidate['transport'] = 'tcp'): Rig & { script
       const link = new Link(transport);
       link.respond = (m) => {
         if (m.method === 'REGISTER') return [script.register(m, links.flatMap((l) => l.requests('REGISTER')).length)];
+        if (m.method === 'INVITE') return [answerInvite(m)];
         return m.method === 'OPTIONS' && !script.quiet ? [reply(m, 200)] : [];
       };
+      link.quiet = () => script.quiet;
       links.push(link);
       return link.connection;
     },
     diagnostics, media: noMedia as never, random: () => 0.5,
-    rtp: { allocatePort: async () => 20000, create: () => { throw new Error('no'); } }
+    rtp: {
+      allocatePort: async () => 20000,
+      create: () => ({
+        sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), setHeld: vi.fn(), close: vi.fn(),
+        localPort: 20000, get stats() { return { rxPackets: media.rx, txPackets: 0, lostPackets: 0, muted: false }; }
+      }) as never
+    }
   });
   return { engine, links, diagnostics, opens: () => links.length, failOpen, script };
 };
@@ -86,9 +116,12 @@ const registers = (r: Rig): SipRequest[] => r.links.flatMap((l) => l.requests('R
 const optionsPings = (r: Rig): SipRequest[] => r.links.flatMap((l) => l.requests('OPTIONS'));
 const stateOf = (r: Rig): string | undefined => r.engine.getRegistrations()['acc1']?.state;
 const keys = (r: Rig): string[] => r.diagnostics.entries().map((e) => e.messageKey);
+const advanceUntil = async (done: () => boolean): Promise<void> => {
+  for (let i = 0; i < 200 && !done(); i += 1) await advance(1_000);
+};
 const start = async (r: Rig): Promise<void> => { await r.engine.startAccount(account); await advance(1); };
 
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => { media.rx = 0; vi.useFakeTimers(); });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe('registration retry', () => {
@@ -287,63 +320,112 @@ describe('resume from sleep', () => {
 });
 
 describe('keepalive and dead-flow detection', () => {
-  it('pings a UDP flow with OPTIONS every 20 s of silence, not before', async () => {
+  const pings = (r: Rig): number => r.links.reduce((sum, l) => sum + l.keepalives, 0);
+  const hangups = (r: Rig): SipRequest[] => r.links.flatMap((l) => l.requests('BYE'));
+  const reinvites = (r: Rig, index: number): SipRequest[] => (r.links[index]?.requests('INVITE') ?? []);
+  const callStates = (r: Rig): string[] => r.engine.getCallViews().map((view) => view.call.state);
+
+  async function withActiveCall(transport: TransportCandidate['transport'] = 'udp'): Promise<ScriptedRig> {
+    const r = rig(transport);
+    r.script.quiet = true;
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    expect(callStates(r)).toEqual(['active']);
+    return r;
+  }
+
+  it('pings a UDP flow with a CRLF ping, not an OPTIONS request, every 20 s of silence', async () => {
     const r = rig('udp');
     await start(r);
     await advance(19_000);
-    expect(optionsPings(r)).toHaveLength(0);
+    expect(pings(r)).toBe(0);
     await advance(1_000);
-    expect(optionsPings(r)).toHaveLength(1);
+    expect(pings(r)).toBe(1);
     await advance(19_000);
-    expect(optionsPings(r)).toHaveLength(1);
+    expect(pings(r)).toBe(1);
     await advance(1_000);
-    expect(optionsPings(r)).toHaveLength(2);
-    expect(headerValue((optionsPings(r)[1] as SipRequest).headers, 'cseq')).toBe('2 OPTIONS');
+    expect(pings(r)).toBe(2);
+    expect(optionsPings(r)).toHaveLength(0);
   });
 
-  it('pings a TCP flow only every 60 s', async () => {
+  it('pings a TCP flow with a CRLF ping only every 60 s', async () => {
     const r = rig('tcp');
     await start(r);
     await advance(55_000);
-    expect(optionsPings(r)).toHaveLength(0);
+    expect(pings(r)).toBe(0);
     await advance(5_000);
-    expect(optionsPings(r)).toHaveLength(1);
+    expect(pings(r)).toBe(1);
+    expect(optionsPings(r)).toHaveLength(0);
   });
 
-  it('stays registered while the server answers', async () => {
-    const r = rig('udp');
+  it('keeps an OPTIONS request as the ping over WebSocket, where CRLF is not valid SIP', async () => {
+    const r = rig('ws');
     await start(r);
-    await advance(250 * SECOND);
+    await advance(60_000);
+    expect(optionsPings(r)).toHaveLength(1);
+    expect(pings(r)).toBe(0);
+    expect(headerValue((optionsPings(r)[0] as SipRequest).headers, 'cseq')).toBe('1 OPTIONS');
+  });
+
+  it('stays registered when the server ignores pings but speaks now and then', async () => {
+    const r = rig('udp');
+    r.script.quiet = true;
+    await start(r);
+    for (let i = 0; i < 10; i += 1) {
+      await advance(30_000);
+      r.links[0]?.hear();
+    }
     expect(stateOf(r)).toBe('registered');
     expect(r.opens()).toBe(1);
+  });
+
+  it('counts the server own CRLF ping, which is no SIP message at all, as proof of life', async () => {
+    const r = rig('udp');
+    r.script.quiet = true;
+    await start(r);
+    for (let i = 0; i < 25; i += 1) {
+      await advance(10_000);
+      r.links[0]?.hear();
+    }
+    expect(stateOf(r)).toBe('registered');
+    expect(keys(r)).not.toContain('logs.event.deadFlow');
+    expect(r.opens()).toBe(1);
+  });
+
+  it('does not declare a UDP flow dead one tick before the threshold, and does on the tick that reaches it', async () => {
+    const r = rig('udp');
+    r.script.quiet = true;
+    await start(r);
+    await advance(55_000);
+    expect(keys(r)).not.toContain('logs.event.deadFlow');
+    expect(r.opens()).toBe(1);
+    await advance(5_000);
+    expect(keys(r)).toContain('logs.event.deadFlow');
+    expect(r.opens()).toBe(2);
   });
 
   it('declares the flow dead after 60 s of silence, logs it, and registers again on a new connection', async () => {
     const r = rig('udp');
     r.script.quiet = true;
     await start(r);
-    await advance(55_000);
-    expect(stateOf(r)).toBe('registered');
-    await advance(5_000);
-    expect(stateOf(r)).toBe('failed');
+    await advance(60_000);
     expect(keys(r)).toContain('logs.event.deadFlow');
     expect(r.links[0]?.closed).toBe(true);
-    await advance(5_000);
+    await advance(10);
     expect(r.opens()).toBe(2);
     expect(stateOf(r)).toBe('registered');
+    expect(registers(r)).toHaveLength(2);
   });
 
-  it('treats ANY inbound traffic as proof of life, such as the server own pings', async () => {
-    const r = rig('udp');
+  it('gives a stream flow three minutes, not one', async () => {
+    const r = rig('tcp');
     r.script.quiet = true;
     await start(r);
-    const stray = { kind: 'response', status: 200, reason: 'OK', body: '', headers: { 'call-id': ['x'], cseq: ['1 OPTIONS'] } } as SipResponse;
-    for (let i = 0; i < 6; i += 1) {
-      await advance(30_000);
-      r.links[0]?.inject(stray);
-    }
-    expect(stateOf(r)).toBe('registered');
+    await advance(175_000);
     expect(r.opens()).toBe(1);
+    await advance(5_000);
+    expect(r.opens()).toBe(2);
   });
 
   it('stops pinging when the account is turned off', async () => {
@@ -352,7 +434,7 @@ describe('keepalive and dead-flow detection', () => {
     await r.engine.stopAccount('acc1');
     expect(vi.getTimerCount()).toBe(0);
     await advance(120 * SECOND);
-    expect(optionsPings(r)).toHaveLength(0);
+    expect(pings(r)).toBe(0);
   });
 
   it('restarts the dead-flow clock on resume, so a long sleep is not mistaken for silence', async () => {
@@ -363,6 +445,92 @@ describe('keepalive and dead-flow detection', () => {
     await advance(10);
     expect(stateOf(r)).toBe('registered');
     expect(r.opens()).toBe(1);
+  });
+
+  describe('with a call in progress', () => {
+    it('never declares the flow dead while RTP keeps arriving, and does not touch the call', async () => {
+      const r = await withActiveCall();
+      for (let i = 0; i < 60; i += 1) {
+        media.rx += 250;
+        await advance(5_000);
+      }
+      expect(r.opens()).toBe(1);
+      expect(stateOf(r)).toBe('registered');
+      expect(callStates(r)).toEqual(['active']);
+      expect(hangups(r)).toHaveLength(0);
+    });
+
+    it('re-registers on a new connection when signalling AND media have been silent, without ending the call', async () => {
+      const r = await withActiveCall();
+      media.rx = 100;
+      await advanceUntil(() => r.opens() === 2);
+      await advance(100);
+      expect(keys(r)).toContain('logs.event.deadFlow');
+      expect(r.opens()).toBe(2);
+      expect(r.links[0]?.closed).toBe(true);
+      expect(stateOf(r)).toBe('registered');
+      expect(callStates(r)).toEqual(['active']);
+      expect(hangups(r)).toHaveLength(0);
+    });
+
+    it('keeps the call through the registration of the new connection even when that REGISTER fails once', async () => {
+      const r = await withActiveCall();
+      r.script.register = (m, n) => (n === 2 ? reply(m, 503) : reply(m, 200, { expires: ['300'] }));
+      await advanceUntil(() => stateOf(r) === 'failed');
+      expect(callStates(r)).toEqual(['active']);
+      await advanceUntil(() => stateOf(r) === 'registered');
+      expect(stateOf(r)).toBe('registered');
+      expect(callStates(r)).toEqual(['active']);
+      expect(hangups(r)).toHaveLength(0);
+    });
+
+    it('hangs up through the NEW connection afterwards: the dialog follows the entry, not the dead socket', async () => {
+      const r = await withActiveCall();
+      await advanceUntil(() => r.opens() === 2);
+      await advance(100);
+      const view = r.engine.getCallViews()[0];
+      await r.engine.hangup(view?.call.id as string);
+      expect(r.links[1]?.requests('BYE')).toHaveLength(1);
+      expect(r.links[0]?.requests('BYE')).toHaveLength(0);
+      expect(headerValue((r.links[1]?.requests('BYE')[0] as SipRequest).headers, 'via')).toContain('10.0.0.5:5060');
+    });
+
+    it('tells the far end where we are now with a re-INVITE on the new connection (RFC 3261 12.2.1.1 target refresh)', async () => {
+      const r = await withActiveCall();
+      await advanceUntil(() => r.opens() === 2);
+      await advance(100);
+      expect(reinvites(r, 1)).toHaveLength(1);
+      expect(headerValue((reinvites(r, 1)[0] as SipRequest).headers, 'contact')).toContain('transport=udp');
+      await advance(60_000);
+      expect(reinvites(r, 1)).toHaveLength(1);
+    });
+
+    it('does not send that re-INVITE after an ordinary registration refresh', async () => {
+      const r = await withActiveCall();
+      for (let i = 0; i < 60; i += 1) {
+        media.rx += 250;
+        await advance(5_000);
+      }
+      expect(registers(r).length).toBeGreaterThan(1);
+      expect(r.opens()).toBe(1);
+      expect(reinvites(r, 0)).toHaveLength(1);
+    });
+
+    it('does end the call when the account is turned off', async () => {
+      const r = await withActiveCall();
+      await r.engine.stopAccount('acc1');
+      expect(callStates(r).every((state) => state === 'ended')).toBe(true);
+    });
+
+    it('does not crash a hang-up made while the connection is gone, between a failed reopen and the retry', async () => {
+      const r = await withActiveCall();
+      r.failOpen.next = true;
+      await advanceUntil(() => stateOf(r) === 'failed');
+      expect(stateOf(r)).toBe('failed');
+      expect(callStates(r)).toEqual(['active']);
+      const view = r.engine.getCallViews()[0];
+      await expect(r.engine.hangup(view?.call.id as string)).resolves.toBeUndefined();
+    });
   });
 });
 

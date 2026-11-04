@@ -11,6 +11,8 @@ import type { SipTransport } from './transport';
 export interface KeepaliveState {
   readonly lastSentAt: number;
   readonly lastInboundAt: number;
+  /** Inbound RTP packets counted across the account's calls when last looked at; see `noteMedia`. */
+  readonly mediaPackets: number;
 }
 
 export interface KeepalivePolicy {
@@ -41,12 +43,39 @@ export const STREAM_KEEPALIVE: KeepalivePolicy = { pingIntervalMs: 60_000, deadA
 export const keepalivePolicy = (transport: SipTransport): KeepalivePolicy =>
   transport === 'udp' ? DATAGRAM_KEEPALIVE : STREAM_KEEPALIVE;
 
-/** A flow that has just been registered or resumed is alive as of `now`. */
-export const startKeepalive = (now: number): KeepaliveState => ({ lastSentAt: now, lastInboundAt: now });
+/**
+ * What to send as the keepalive. RFC 5626's CRLF ping (`\r\n\r\n`, answered by `\r\n`) suits datagram and
+ * stream transports. WebSocket is the exception: RFC 7118 keeps a connection alive with WebSocket ping
+ * frames, which the socket abstraction does not expose, and a text frame holding bare CRLF is not valid SIP
+ * there, so a real request, whose answer also proves the path, stays the ping.
+ */
+export type KeepaliveMethod = 'crlf' | 'options';
+
+export const keepaliveMethod = (transport: SipTransport): KeepaliveMethod =>
+  transport === 'ws' || transport === 'wss' ? 'options' : 'crlf';
+
+/** A flow that has just been registered or resumed is alive as of `now`; `mediaPackets` is the count seen so far. */
+export const startKeepalive = (now: number, mediaPackets = 0): KeepaliveState => ({
+  lastSentAt: now,
+  lastInboundAt: now,
+  mediaPackets
+});
 
 export const noteSent = (state: KeepaliveState, now: number): KeepaliveState => ({ ...state, lastSentAt: now });
 
 export const noteInbound = (state: KeepaliveState, now: number): KeepaliveState => ({ ...state, lastInboundAt: now });
+
+/**
+ * RTP arriving on an established call is evidence the network works, so a growing packet count counts as
+ * inbound traffic. A count that is unchanged is no evidence either way (a silent or stalled call), and a
+ * smaller one (a call ended) is only remembered. This feeds the inference; it does not replace the RTP
+ * watchdog in core/rtp/flow.ts, which is what judges whether a call itself is dead.
+ */
+export const noteMedia = (state: KeepaliveState, mediaPackets: number, now: number): KeepaliveState => ({
+  ...state,
+  mediaPackets,
+  lastInboundAt: mediaPackets > state.mediaPackets ? now : state.lastInboundAt
+});
 
 /** Dead outranks ping: there is no point pinging a flow we have already given up on. */
 export function decideKeepalive(state: KeepaliveState, now: number, policy: KeepalivePolicy): KeepaliveAction {

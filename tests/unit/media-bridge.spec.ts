@@ -60,6 +60,36 @@ vi.mock('node:dgram', async () => {
   return { createSocket: (): FakeDgram => { const socket = new FakeDgram(); udp.sockets.push(socket); return socket; } };
 });
 
+const tcp = vi.hoisted(() => ({ sockets: [] as unknown[] }));
+
+/** A stream socket fake: records what is written and lets a test push inbound chunks. */
+vi.mock('node:net', async () => {
+  const { EventEmitter: Emitter } = await import('node:events');
+  class FakeStream extends Emitter {
+    written: string[] = [];
+    localAddress = '10.0.0.2';
+    localPort = 5599;
+    setEncoding(): void {}
+    setTimeout(): void {}
+    write(text: string, done?: (error?: Error) => void): boolean {
+      this.written.push(text);
+      done?.();
+      return true;
+    }
+    destroy(): void {
+      this.emit('close');
+    }
+  }
+  return {
+    connect: (): FakeStream => {
+      const socket = new FakeStream();
+      tcp.sockets.push(socket);
+      queueMicrotask(() => socket.emit('connect'));
+      return socket;
+    }
+  };
+});
+
 type Handler = (sender: unknown, ...args: unknown[]) => void;
 
 interface Message {
@@ -504,6 +534,7 @@ type Harness = {
 class Pbx {
   readonly sent: SipMessage[] = [];
   private readonly handlers: ((m: SipMessage) => void)[] = [];
+  private readonly listeners: (() => void)[] = [];
   respond: (m: SipRequest) => SipResponse[] = () => [];
   readonly connection: SipConnection;
 
@@ -516,11 +547,13 @@ class Pbx {
         if (m.kind === 'request') for (const r of this.respond(m)) queueMicrotask(() => this.inject(r));
       },
       onMessage: (l) => { this.handlers.push(l); return () => undefined; },
+      onActivity: (l) => { this.listeners.push(l); return () => undefined; },
+      sendKeepalive: async () => undefined,
       onClose: () => () => undefined,
       close: () => undefined
     } as SipConnection;
   }
-  inject(m: SipMessage): void { this.handlers.forEach((h) => h(m)); }
+  inject(m: SipMessage): void { this.listeners.forEach((l) => l()); this.handlers.forEach((h) => h(m)); }
   requests(method: string): SipRequest[] { return this.sent.filter((m): m is SipRequest => m.kind === 'request' && m.method === method); }
 }
 
@@ -1461,6 +1494,156 @@ describe('UDP connection: datagrams that do not parse', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('connection keepalive and activity', () => {
+  const candidate = { transport: 'udp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
+  const peer = { address: '203.0.113.5', port: 5060 };
+  type Datagram = { sent: { text: string; port: number | undefined; host: string | undefined }[]; receive: (data: string, from: typeof peer, server: typeof candidate) => void };
+  const response = 'SIP/2.0 180 Ringing\r\nCall-ID: abc\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n';
+
+  async function openUdp(): Promise<{ socket: Datagram; activity: number[]; messages: SipMessage[]; notices: { messageKey: string }[]; connection: SipConnection }> {
+    const notices: { messageKey: string }[] = [];
+    const messages: SipMessage[] = [];
+    const activity: number[] = [];
+    const connection = await openConnection(candidate, { onNotice: (notice) => notices.push(notice) });
+    connection.onMessage((message) => messages.push(message));
+    connection.onActivity(() => activity.push(1));
+    return { socket: udp.sockets.at(-1) as Datagram, activity, messages, notices, connection };
+  }
+
+  it('sendKeepalive puts exactly the CRLF ping on the wire, to the server', async () => {
+    const { socket, connection } = await openUdp();
+    await connection.sendKeepalive();
+    expect(socket.sent).toEqual([{ text: '\r\n\r\n', port: 5060, host: '203.0.113.5' }]);
+  });
+
+  it('answers an inbound CRLF ping with a CRLF pong and counts it as activity', async () => {
+    const { socket, activity, messages, notices } = await openUdp();
+    socket.receive('\r\n\r\n', peer, candidate);
+    expect(activity).toHaveLength(1);
+    expect(socket.sent).toEqual([{ text: '\r\n', port: 5060, host: '203.0.113.5' }]);
+    expect(messages).toEqual([]);
+    expect(notices).toEqual([]);
+  });
+
+  it('counts a pong as activity but never answers it, so two peers cannot echo forever', async () => {
+    const { socket, activity } = await openUdp();
+    socket.receive('\r\n', peer, candidate);
+    expect(activity).toHaveLength(1);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it('counts a datagram that does not parse as activity and still reports it as dropped', async () => {
+    const { socket, activity, notices, messages } = await openUdp();
+    socket.receive('not sip at all', peer, candidate);
+    expect(activity).toHaveLength(1);
+    expect(notices.map((n) => n.messageKey)).toEqual(['logs.event.datagramDropped']);
+    expect(messages).toEqual([]);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it('counts a well-formed message as activity too, and signals before delivering it', async () => {
+    const order: string[] = [];
+    const connection = await openConnection(candidate);
+    connection.onActivity(() => order.push('activity'));
+    connection.onMessage(() => order.push('message'));
+    (udp.sockets.at(-1) as Datagram).receive(response, peer, candidate);
+    expect(order).toEqual(['activity', 'message']);
+  });
+
+  it('stops signalling a listener that unsubscribed', async () => {
+    const connection = await openConnection(candidate);
+    const seen: number[] = [];
+    const stop = connection.onActivity(() => seen.push(1));
+    const socket = udp.sockets.at(-1) as Datagram;
+    socket.receive('\r\n', peer, candidate);
+    stop();
+    socket.receive('\r\n', peer, candidate);
+    expect(seen).toHaveLength(1);
+  });
+
+  describe('stream transport', () => {
+    type Stream = { written: string[]; emit: (event: string, ...args: unknown[]) => boolean };
+    const tcpCandidate = { transport: 'tcp', host: '203.0.113.5', port: 5060, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
+
+    async function openTcp(): Promise<{ socket: Stream; activity: number[]; messages: SipMessage[]; connection: SipConnection }> {
+      const connection = await openConnection(tcpCandidate);
+      const activity: number[] = [];
+      const messages: SipMessage[] = [];
+      connection.onActivity(() => activity.push(1));
+      connection.onMessage((message) => messages.push(message));
+      return { socket: tcp.sockets.at(-1) as Stream, activity, messages, connection };
+    }
+
+    it('sendKeepalive writes the CRLF ping', async () => {
+      const { socket, connection } = await openTcp();
+      await connection.sendKeepalive();
+      expect(socket.written).toEqual(['\r\n\r\n']);
+    });
+
+    it('answers a chunk that is only a CRLF ping with a pong, and counts it as activity', async () => {
+      const { socket, activity, messages } = await openTcp();
+      socket.emit('data', '\r\n\r\n');
+      expect(activity).toHaveLength(1);
+      expect(socket.written).toEqual(['\r\n']);
+      expect(messages).toEqual([]);
+    });
+
+    it('does not answer a pong, nor a chunk that carries a message', async () => {
+      const { socket, activity, messages } = await openTcp();
+      socket.emit('data', '\r\n');
+      socket.emit('data', response);
+      expect(activity).toHaveLength(2);
+      expect(messages).toHaveLength(1);
+      expect(socket.written).toEqual([]);
+    });
+
+    it('counts a partial message chunk as activity even though nothing is delivered yet', async () => {
+      const { socket, activity, messages } = await openTcp();
+      socket.emit('data', 'SIP/2.0 180 Rin');
+      expect(activity).toHaveLength(1);
+      expect(messages).toEqual([]);
+    });
+  });
+
+  describe('WebSocket transport', () => {
+    class FakeWs {
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: unknown }) => void) | null = null;
+      sent: string[] = [];
+      constructor() { queueMicrotask(() => this.onopen?.()); }
+      send(data: string): void { this.sent.push(data); }
+      close(): void {}
+    }
+    const wsCandidate = { transport: 'ws', host: 'pbx.test', port: 8088, source: 'a', weight: 0, srvPriority: 0 } as unknown as TransportCandidate;
+
+    async function openWs(): Promise<{ ws: FakeWs; activity: number[]; connection: SipConnection }> {
+      const made: FakeWs[] = [];
+      const Ctor = class extends FakeWs { constructor() { super(); made.push(this); } };
+      const connection = await openConnection(wsCandidate, { webSocket: Ctor });
+      const activity: number[] = [];
+      connection.onActivity(() => activity.push(1));
+      return { ws: made[0] as FakeWs, activity, connection };
+    }
+
+    it('counts every frame as activity, a binary one included, and never sends a pong', async () => {
+      const { ws, activity } = await openWs();
+      ws.onmessage?.({ data: '\r\n\r\n' });
+      ws.onmessage?.({ data: new ArrayBuffer(4) });
+      ws.onmessage?.({ data: response });
+      expect(activity).toHaveLength(3);
+      expect(ws.sent).toEqual([]);
+    });
+
+    it('refuses a CRLF keepalive: over WebSocket the ping is an OPTIONS request', async () => {
+      const { ws, connection } = await openWs();
+      await expect(connection.sendKeepalive()).rejects.toThrow('keepalive-unsupported');
+      expect(ws.sent).toEqual([]);
+    });
   });
 });
 

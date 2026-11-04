@@ -32,9 +32,11 @@ import {
   incomingCall,
   initialRegistration,
   isResponse,
+  keepaliveMethod,
   keepalivePolicy,
   negotiate,
   noteInbound,
+  noteMedia,
   noteSent,
   normaliseTarget,
   outgoingCall,
@@ -219,6 +221,11 @@ interface Entry {
   /** An Expires the registrar insisted on (423 Min-Expires), kept for every later refresh. */
   expires: number | undefined;
   keepalive: Keepalive | undefined;
+  /**
+   * Set when the flow was declared dead by inference. Calls then survive: the connection is replaced and the
+   * registration recovered, but nothing hangs up on a guess. Cleared once registered again.
+   */
+  keepCalls: boolean;
 }
 
 interface MediaPlan {
@@ -286,12 +293,32 @@ interface Dialog {
   muted: boolean;
   cancelled: boolean;
   connectedAt: number | undefined;
+  /** The connection our last target-refresh re-INVITE went out on, so a replaced one is told about at most once. */
+  refreshedOn: SipConnection | undefined;
 }
 
 type DialogBase = Pick<
   Dialog,
   'entry' | 'role' | 'callId' | 'invite' | 'localTag' | 'sdpSession' | 'remoteHeader' | 'target' | 'routes' | 'direction' | 'plan' | 'rtpPort'
 >;
+
+function newEntry(account: SipAccount): Entry {
+  return {
+    account,
+    snapshot: initialRegistration,
+    candidate: undefined,
+    connection: undefined,
+    timer: undefined,
+    stopped: false,
+    sharing: undefined,
+    sharingKey: undefined,
+    failures: 0,
+    raises: 0,
+    expires: undefined,
+    keepalive: undefined,
+    keepCalls: false
+  };
+}
 
 /* ------------------------------------------------------------------ wire */
 
@@ -691,20 +718,7 @@ export class SipEngine {
   /** Returns once the account is registering; discovery and REGISTER continue in the background. */
   async startAccount(account: SipAccount): Promise<void> {
     await this.stopAccount(account.id);
-    const entry: Entry = {
-      account,
-      snapshot: initialRegistration,
-      candidate: undefined,
-      connection: undefined,
-      timer: undefined,
-      stopped: false,
-      sharing: undefined,
-      sharingKey: undefined,
-      failures: 0,
-      raises: 0,
-      expires: undefined,
-      keepalive: undefined
-    };
+    const entry = newEntry(account);
     this.entries.set(account.id, entry);
     this.dispatchRegistration(entry, { type: 'register' });
     void this.run(entry);
@@ -1110,6 +1124,11 @@ export class SipEngine {
       this.noteTraffic(entry, noteSent);
       return send(message);
     };
+    const keepalive = connection.sendKeepalive.bind(connection);
+    connection.sendKeepalive = (): Promise<void> => {
+      this.noteTraffic(entry, noteSent);
+      return keepalive();
+    };
   }
 
   /* ------------------------------------------------------- registration */
@@ -1153,10 +1172,13 @@ export class SipEngine {
       connection.close();
       return;
     }
+    const previous = entry.connection;
     entry.connection = connection;
     this.instrument(entry, connection);
+    connection.onActivity(() => this.noteTraffic(entry, noteInbound));
     connection.onMessage((message) => this.onMessage(entry, message));
     connection.onClose((reason) => this.onClosed(entry, connection, reason));
+    previous?.close();
     await this.refresh(entry);
   }
 
@@ -1173,6 +1195,7 @@ export class SipEngine {
     this.trackSharing(entry, result);
     if (entry.snapshot.state === 'registering') this.dispatchRegistration(entry, { type: 'registered' });
     this.beginKeepalive(entry);
+    this.recoverCalls(entry);
     const delay = Math.max(MIN_REFRESH_MS, Math.floor(result.expiresIn * REFRESH_FRACTION * 1000));
     entry.timer = setTimeout(() => void this.refresh(entry), delay);
   }
@@ -1210,7 +1233,7 @@ export class SipEngine {
     entry.failures += 1;
     this.forgetSharing(entry);
     this.clearTimer(entry);
-    this.dropConnection(entry);
+    this.dropConnection(entry, !entry.keepCalls);
     this.dispatchRegistration(entry, { type: 'failed', reason });
     if (decision.action === 'retry') this.scheduleRetry(entry, decision.delayMs);
   }
@@ -1260,7 +1283,7 @@ export class SipEngine {
     this.note(entry.account.id, 'logs.event.resumed');
     this.clearTimer(entry);
     entry.failures = 0;
-    if (entry.keepalive !== undefined) entry.keepalive.state = freshKeepalive(this.deps.now());
+    if (entry.keepalive !== undefined) entry.keepalive.state = freshKeepalive(this.deps.now(), this.mediaPackets(entry));
     if (waiting) this.retry(entry);
     else void this.refresh(entry);
     return true;
@@ -1276,7 +1299,7 @@ export class SipEngine {
   private beginKeepalive(entry: Entry): void {
     if (entry.keepalive !== undefined) return;
     const timer = setInterval(() => this.tickKeepalive(entry), KEEPALIVE_TICK_MS);
-    entry.keepalive = { state: freshKeepalive(this.deps.now()), timer, cseq: 0 };
+    entry.keepalive = { state: freshKeepalive(this.deps.now(), this.mediaPackets(entry)), timer, cseq: 0 };
   }
 
   private endKeepalive(entry: Entry): void {
@@ -1284,15 +1307,32 @@ export class SipEngine {
     entry.keepalive = undefined;
   }
 
+  /**
+   * Inbound RTP packets across this account's calls. Media arriving proves the network is up, so a call that
+   * is still receiving audio vouches for the flow; a call that went quiet vouches for nothing, and that is
+   * judged by the RTP watchdog, not here.
+   */
+  private mediaPackets(entry: Entry): number {
+    return [...this.dialogs.values()]
+      .filter((dialog) => dialog.entry === entry)
+      .reduce((total, dialog) => total + (dialog.media?.session.stats.rxPackets ?? 0), 0);
+  }
+
   private tickKeepalive(entry: Entry): void {
     const { keepalive, connection } = entry;
     if (keepalive === undefined || connection === undefined) return;
-    const action = decideKeepalive(keepalive.state, this.deps.now(), keepalivePolicy(connection.candidate.transport));
+    const now = this.deps.now();
+    keepalive.state = noteMedia(keepalive.state, this.mediaPackets(entry), now);
+    const action = decideKeepalive(keepalive.state, now, keepalivePolicy(connection.candidate.transport));
     if (action === 'ping') this.ping(entry, connection, keepalive);
     else if (action === 'dead') this.declareDead(entry);
   }
 
   private ping(entry: Entry, connection: SipConnection, keepalive: Keepalive): void {
+    if (keepaliveMethod(connection.candidate.transport) === 'crlf') {
+      connection.sendKeepalive().catch(() => undefined);
+      return;
+    }
     keepalive.cseq += 1;
     const { account } = entry;
     const request = buildOptionsRequest(
@@ -1303,9 +1343,20 @@ export class SipEngine {
     connection.send(request).catch(() => undefined);
   }
 
+  /**
+   * Silence is an inference, so acting on it must be reversible: the connection is replaced and the account
+   * registers again at once, but no call is ended (the RTP watchdog judges calls). The old connection stays in
+   * place until the new one is attached, so a BYE sent in between still has a socket to try.
+   */
   private declareDead(entry: Entry): void {
     this.note(entry.account.id, 'logs.event.deadFlow', { level: 'warn' });
-    this.fail(entry, DEAD_FLOW_KEY, TRANSPORT_FAILURE);
+    entry.keepCalls = true;
+    entry.failures += 1;
+    this.forgetSharing(entry);
+    this.clearTimer(entry);
+    this.endKeepalive(entry);
+    this.dispatchRegistration(entry, { type: 'failed', reason: DEAD_FLOW_KEY });
+    this.retry(entry);
   }
 
   private noteTraffic(entry: Entry, update: (state: KeepaliveState, now: number) => KeepaliveState): void {
@@ -1321,12 +1372,12 @@ export class SipEngine {
     if (result.ok) this.note(account.id, 'logs.event.unregistered');
   }
 
-  private dropConnection(entry: Entry): void {
+  private dropConnection(entry: Entry, endCalls = true): void {
     const { connection } = entry;
     entry.connection = undefined;
     this.endKeepalive(entry);
     connection?.close();
-    this.endCallsOf(entry.account.id);
+    if (endCalls) this.endCallsOf(entry.account.id);
   }
 
   private clearTimer(entry: Entry): void {
@@ -1357,7 +1408,6 @@ export class SipEngine {
 
   private onMessage(entry: Entry, message: SipRequest | SipResponse): void {
     if (entry.stopped) return;
-    this.noteTraffic(entry, noteInbound);
     this.traceReceived(entry, message);
     if (!isResponse(message)) return this.onRequest(entry, message);
     this.learnMapping(entry, message);
@@ -1378,12 +1428,33 @@ export class SipEngine {
 
   /** A confirmed call whose SDP names a host that is no longer our reachable one gets a fresh offer. */
   private reofferStale(entry: Entry): void {
-    for (const dialog of this.dialogs.values()) {
-      const stale = dialog.entry === entry && dialog.stage === 'confirmed' && dialog.pending === undefined;
-      if (stale && dialog.advertised !== this.hostOf(dialog)) {
-        this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction)).catch(this.logSend);
-      }
-    }
+    this.confirmedDialogs(entry)
+      .filter((dialog) => dialog.advertised !== this.hostOf(dialog))
+      .forEach((dialog) => this.reoffer(dialog));
+  }
+
+  private confirmedDialogs(entry: Entry): Dialog[] {
+    return [...this.dialogs.values()].filter(
+      (dialog) => dialog.entry === entry && dialog.stage === 'confirmed' && dialog.pending === undefined
+    );
+  }
+
+  private reoffer(dialog: Dialog): void {
+    dialog.refreshedOn = dialog.entry.connection;
+    this.sendRequest(dialog, 'INVITE', this.sdpFor(dialog, dialog.direction)).catch(this.logSend);
+  }
+
+  /**
+   * After a dead flow was replaced, every confirmed call still names the old socket in its Contact, so the far
+   * end would keep sending BYE and re-INVITE there. A re-INVITE on the new connection refreshes the remote
+   * target (RFC 3261 section 12.2.1.1). One already sent for the same reason (a changed mapped address) is enough.
+   */
+  private recoverCalls(entry: Entry): void {
+    if (!entry.keepCalls) return;
+    entry.keepCalls = false;
+    this.confirmedDialogs(entry)
+      .filter((dialog) => dialog.refreshedOn !== entry.connection)
+      .forEach((dialog) => this.reoffer(dialog));
   }
 
   /** Registered yet no mapping reported: the server does not echo `received`, so say so rather than fail the call. */
@@ -1537,7 +1608,8 @@ export class SipEngine {
       held: false,
       muted: false,
       cancelled: false,
-      connectedAt: undefined
+      connectedAt: undefined,
+      refreshedOn: undefined
     };
   }
 
@@ -1559,9 +1631,10 @@ export class SipEngine {
   }
 
   private async sendRequest(dialog: Dialog, method: string, body?: string): Promise<void> {
+    const { connection } = dialog.entry;
+    if (connection === undefined) return log('warn', `${method} not sent: no connection`);
     dialog.cseq += 1;
-    const request = buildDialogRequest(dialog, method, dialog.cseq, this.deps.ids.newBranch(), body);
-    await dialog.entry.connection?.send(request);
+    await connection.send(buildDialogRequest(dialog, method, dialog.cseq, this.deps.ids.newBranch(), body));
   }
 
   private sendAckTo(dialog: Dialog, request: SipRequest): void {

@@ -79,6 +79,8 @@ function fakeConnection(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    onActivity: () => () => undefined,
+    sendKeepalive: async () => undefined,
     onClose: () => () => undefined,
     close: () => undefined
   };

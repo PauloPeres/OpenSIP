@@ -3,8 +3,10 @@ import {
   DATAGRAM_KEEPALIVE,
   STREAM_KEEPALIVE,
   decideKeepalive,
+  keepaliveMethod,
   keepalivePolicy,
   noteInbound,
+  noteMedia,
   noteSent,
   startKeepalive
 } from '../../src/core/sip/keepalive';
@@ -29,18 +31,19 @@ describe('policies', () => {
 
 describe('state', () => {
   it('starts with both clocks at now', () => {
-    expect(startKeepalive(500)).toEqual({ lastSentAt: 500, lastInboundAt: 500 });
+    expect(startKeepalive(500)).toEqual({ lastSentAt: 500, lastInboundAt: 500, mediaPackets: 0 });
+    expect(startKeepalive(500, 42).mediaPackets).toBe(42);
   });
 
   it('noteSent moves only the send clock, noteInbound only the inbound clock', () => {
-    const state = { lastSentAt: 1, lastInboundAt: 2 };
-    expect(noteSent(state, 9)).toEqual({ lastSentAt: 9, lastInboundAt: 2 });
-    expect(noteInbound(state, 9)).toEqual({ lastSentAt: 1, lastInboundAt: 9 });
+    const state = { lastSentAt: 1, lastInboundAt: 2, mediaPackets: 7 };
+    expect(noteSent(state, 9)).toEqual({ lastSentAt: 9, lastInboundAt: 2, mediaPackets: 7 });
+    expect(noteInbound(state, 9)).toEqual({ lastSentAt: 1, lastInboundAt: 9, mediaPackets: 7 });
   });
 });
 
 describe('decideKeepalive', () => {
-  const at = (sentAgo: number, inboundAgo: number) => decideKeepalive({ lastSentAt: 1_000_000 - sentAgo, lastInboundAt: 1_000_000 - inboundAgo }, 1_000_000, POLICY);
+  const at = (sentAgo: number, inboundAgo: number) => decideKeepalive({ lastSentAt: 1_000_000 - sentAgo, lastInboundAt: 1_000_000 - inboundAgo, mediaPackets: 0 }, 1_000_000, POLICY);
 
   it('does nothing while both clocks are fresh', () => {
     expect(at(0, 0)).toBe('none');
@@ -72,6 +75,48 @@ describe('decideKeepalive', () => {
   });
 });
 
+describe('keepaliveMethod', () => {
+  it('uses the RFC 5626 CRLF ping on UDP, TCP and TLS', () => {
+    for (const transport of ['udp', 'tcp', 'tls'] as const) expect(keepaliveMethod(transport)).toBe('crlf');
+  });
+
+  it('keeps an OPTIONS request over WebSocket, where RFC 7118 uses protocol-level ping frames, not CRLF', () => {
+    for (const transport of ['ws', 'wss'] as const) expect(keepaliveMethod(transport)).toBe('options');
+  });
+});
+
+describe('noteMedia: RTP packets that keep arriving are proof the network is up', () => {
+  const state = { lastSentAt: 0, lastInboundAt: 100, mediaPackets: 50 };
+
+  it('treats a growing packet count as inbound traffic now', () => {
+    expect(noteMedia(state, 51, 900)).toEqual({ lastSentAt: 0, lastInboundAt: 900, mediaPackets: 51 });
+  });
+
+  it('does not refresh liveness when the count is unchanged (a stalled call is no evidence)', () => {
+    expect(noteMedia(state, 50, 900)).toEqual(state);
+  });
+
+  it('records a smaller count without refreshing, so a call that ended and a new one counting from zero still works', () => {
+    const lower = noteMedia(state, 3, 900);
+    expect(lower).toEqual({ lastSentAt: 0, lastInboundAt: 100, mediaPackets: 3 });
+    expect(noteMedia(lower, 4, 950).lastInboundAt).toBe(950);
+  });
+
+  it('keeps a call with flowing media from ever being declared dead', () => {
+    let current = startKeepalive(0);
+    for (let at = 5_000, packets = 250; at <= 600_000; at += 5_000, packets += 250) {
+      current = noteMedia(current, packets, at);
+      expect(decideKeepalive(current, at, POLICY)).not.toBe('dead');
+    }
+  });
+
+  it('declares death 60 s after the media stopped, not before', () => {
+    const last = noteMedia(startKeepalive(0), 100, 10_000);
+    expect(decideKeepalive(noteMedia(last, 100, 69_999), 69_999, POLICY)).not.toBe('dead');
+    expect(decideKeepalive(noteMedia(last, 100, 70_000), 70_000, POLICY)).toBe('dead');
+  });
+});
+
 describe('CRLF keepalive framing', () => {
   it('is skipped by the stream framer, leading or between messages', () => {
     const message = 'OPTIONS sip:a SIP/2.0\r\nCall-ID: 1\r\nContent-Length: 0\r\n\r\n';
@@ -81,7 +126,7 @@ describe('CRLF keepalive framing', () => {
     expect(framed.rest).toBe('');
   });
 
-  it('is not a message on its own over a datagram, so the connection drops it silently', () => {
+  it('is not a message on its own over a datagram, so the connection must recognise it before parsing', () => {
     expect(() => parse('\r\n\r\n')).toThrow();
   });
 });
