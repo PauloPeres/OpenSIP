@@ -18,8 +18,9 @@ version, push a tag, review the draft it produces, and publish it yourself.
        npm run release:push     # git push --follow-tags
 
 4. The `release` workflow starts on the tag. Watch it under **Actions**.
-5. When it is green, open **Releases**. There is a **draft** `vX.Y.Z` holding every
-   installer. Download and try at least one, read the notes, edit them if you want.
+5. When it is green, open **Releases**. Read the `verify-draft` summary first: green means
+   the run finished, not that the draft is complete. There is a **draft** `vX.Y.Z` holding
+   the installers. Download and try at least one, read the notes, edit them if you want.
 6. Click **Publish release**. This is the step that reaches users.
 
 To start a release without pushing a tag, run the `release` workflow by hand from the
@@ -42,8 +43,10 @@ branch you pick and still only produces a draft.
    and `ubuntu-latest` (x64), each calling `electron-builder --publish always`. Every
    platform uploads its installers and its metadata file to the same draft
    (`electron-builder.yml` sets `releaseType: draft`).
-4. **verify-draft** fails unless the draft holds `latest.yml`, `latest-mac.yml`,
-   `latest-linux.yml` and a `.dmg`, `.zip`, `.exe`, `.AppImage` and `.deb`.
+4. **verify-draft** checks that the draft holds `latest.yml`, `latest-mac.yml`,
+   `latest-linux.yml` and a `.dmg`, `.zip`, `.exe`, `.AppImage` and `.deb`. It reports what
+   is missing in the run summary and fails only if there is no draft or it is empty (see
+   below).
 
 Every job has a `timeout-minutes` (quality 30, CI build 20, check and verify-draft 10,
 release build 45), so a hung job fails in a bounded time. Note this limits a job once
@@ -90,19 +93,35 @@ the next release will meet the same things.
   `latest*.yml` resolves to a real asset. For v0.1.0 every download URL was checked and
   returned HTTP 200.
 
-### Known problems in the workflow
+### Two behaviours of the workflow, and why they exist
 
-Recorded, not fixed. Changing `.github/workflows/` is a decision for the owner.
+Both came out of v0.1.0 and both are now handled in `.github/workflows/release.yml`.
 
-1. **Deleting a tag also triggers the release workflow.** Recycling a tag (delete it,
-   push it again on a new commit) therefore starts two runs for one commit, one for the
-   deletion and one for the push. During v0.1.0 one of them had to be cancelled by hand.
-   Prefer a new version over recycling a tag, and check **Actions** after any tag change.
-2. **`verify-draft` fails the run when any artifact is missing.** An infrastructure
-   outage, such as the missing macOS runner above, therefore blocks a release that is
-   ready for two of the three platforms. There is no way to accept a partial draft short of
-   uploading the missing files by hand (see the trap above) or publishing despite the
-   red run.
+1. **Deleting a tag does not start a run.** A `v*` tag trigger fires for deletion as well
+   as creation, so recycling a tag (delete it, push it again on a new commit) used to start
+   two runs for one commit; during v0.1.0 one had to be cancelled by hand. The `check` job
+   now skips itself when `github.event.deleted` is `true`. Every other job needs `check`,
+   so the whole run is skipped. The comparison goes through `format()` so it also holds on
+   a manual run, where that value is absent. Prefer a new version over recycling a tag
+   anyway, and check **Actions** after any tag change.
+2. **`verify-draft` reports; it does not block.** It used to fail the run when any artifact
+   was missing, so an outage such as the missing macOS runner above turned a release that
+   was ready for two of three platforms into a red run. Nothing reaches users until you
+   publish the draft, so a missing artifact is information for that decision. The job now
+   runs whenever `check` and `quality` succeeded and the run was not cancelled, even if
+   `build` failed on one platform. For each of the eight expected assets it writes a
+   warning when missing, and it writes a table of found and missing to the run summary,
+   followed by a verdict: either the draft is complete, or which platforms are missing and
+   that publishing would ship a release those users cannot install or update to. It names
+   the update manifests specifically: a draft without `latest-mac.yml` silently breaks
+   updates for every existing macOS install, which is worse than a missing installer.
+
+   **Still fails the run:** no draft for the version, or a draft with no assets at all.
+   That is not one platform degraded; nothing was produced. A failed `check` or `quality`
+   also stops the run before any build, as before.
+
+   A green `verify-draft` therefore no longer means the draft is complete. Read the run
+   summary before you publish.
 
 ## What the app does with a release
 
@@ -125,7 +144,7 @@ macOS to automatic updates with no code or flag change.
 
 ## Verify a release worked
 
-1. Draft complete: the `verify-draft` job is green; the asset list matches the table above.
+1. Draft complete: the `verify-draft` run summary says "Complete" (green alone is not enough, since the job reports missing assets without failing); the asset list matches the table above.
 2. Metadata sane: `latest*.yml` open and list the right `version`.
 3. Before publishing, install the previous version, then publish the new one.
 4. Launch the old version (a packaged build; dev builds never check). On

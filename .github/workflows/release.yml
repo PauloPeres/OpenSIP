@@ -17,6 +17,12 @@ concurrency:
 
 jobs:
   check:
+    # A tag push also fires for tag DELETION (github.event.deleted == true). Skip that:
+    # every other job needs check, so this skips the whole run. On workflow_dispatch the
+    # value is absent, and GitHub compares a null loosely: `null == false` is TRUE, the
+    # trap ci.yml's `build` job documents. `!= true` would survive it, but format() makes
+    # the string comparison explicit so neither direction can bite later.
+    if: ${{ format('{0}', github.event.deleted) != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -92,25 +98,88 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # electron-updater needs all three metadata files; fail here rather than discover it later.
+  # Reports; it does not gate. Nothing reaches users until the owner publishes the draft,
+  # so a missing artifact (say, no macOS runner) is information for that decision, not a
+  # build failure. It still fails when there is no draft or the draft has no assets at all.
+  # It must run when `build` partly failed, which is when the report is most wanted:
+  # without a status function a failed need would skip it. quality is required too, so a
+  # run whose gates failed (nothing built) does not add a misleading "no draft" error.
   verify-draft:
-    needs: [check, build]
+    needs: [check, quality, build]
+    if: ${{ !cancelled() && needs.check.result == 'success' && needs.quality.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: The draft holds every installer family and metadata file
+      - name: Report which installers and update manifests the draft holds
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
+          drafts=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"v$VERSION\" and .draft == true) | .id")
           assets=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
             --jq ".[] | select(.tag_name == \"v$VERSION\" and .draft == true) | .assets[].name")
           echo "$assets"
-          missing=0
-          for pattern in '^latest\.yml$' '^latest-mac\.yml$' '^latest-linux\.yml$' '\.dmg$' '\.zip$' '\.exe$' '\.AppImage$' '\.deb$'; do
-            if ! echo "$assets" | grep -Eq "$pattern"; then
-              echo "::error::The draft for v$VERSION has no asset matching $pattern"
-              missing=1
+
+          # Nothing produced at all is a failure, not a degraded platform.
+          if [ -z "$drafts" ]; then
+            echo "::error::There is no draft release for v$VERSION. Nothing was produced."
+            echo "### Draft v$VERSION: not found" >> "$GITHUB_STEP_SUMMARY"
+            echo "No draft release exists for v$VERSION. Nothing was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ -z "$assets" ]; then
+            echo "::error::The draft for v$VERSION has no assets. Nothing was produced."
+            echo "### Draft v$VERSION: empty" >> "$GITHUB_STEP_SUMMARY"
+            echo "The draft exists but holds no assets. Nothing was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          {
+            echo "### Draft v$VERSION"
+            echo
+            echo "| Expected | Platform | Result |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          missing_platforms=""
+          missing_manifests=""
+          missing_count=0
+          check_asset() { # pattern label platform manifest(yes|no)
+            if echo "$assets" | grep -Eq "$1"; then
+              echo "| \`$2\` | $3 | found |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::The draft for v$VERSION has no asset matching $1 ($3)"
+              echo "| \`$2\` | $3 | **missing** |" >> "$GITHUB_STEP_SUMMARY"
+              missing_count=$((missing_count + 1))
+              case " $missing_platforms " in *" $3 "*) ;; *) missing_platforms="$missing_platforms $3" ;; esac
+              if [ "$4" = yes ]; then missing_manifests="$missing_manifests $2"; fi
             fi
-          done
-          exit $missing
+          }
+          check_asset '^latest\.yml$' latest.yml Windows yes
+          check_asset '^latest-mac\.yml$' latest-mac.yml macOS yes
+          check_asset '^latest-linux\.yml$' latest-linux.yml Linux yes
+          check_asset '\.dmg$' '*.dmg' macOS no
+          check_asset '\.zip$' '*.zip' macOS no
+          check_asset '\.exe$' '*.exe' Windows no
+          check_asset '\.AppImage$' '*.AppImage' Linux no
+          check_asset '\.deb$' '*.deb' Linux no
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          platforms=$(echo $missing_platforms | sed 's/ /, /g')
+          manifests=$(echo $missing_manifests | sed 's/ /, /g')
+          if [ "$missing_count" -eq 0 ]; then
+            echo "**Complete.** All eight expected assets are present, including the three update manifests." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "**Incomplete: $missing_count of 8 expected assets are missing. Platforms affected: $platforms.**"
+              echo
+              echo "Publishing this draft would ship a release that those users cannot install or update to."
+              if [ -n "$missing_manifests" ]; then
+                echo
+                echo "Missing update manifests: $manifests. electron-updater needs all three of latest.yml, latest-mac.yml and latest-linux.yml. A draft without \`latest-mac.yml\` silently breaks updates for every existing macOS install, which is worse than a missing installer."
+              fi
+              echo
+              echo "This job reports and does not block. Re-run the failed build, or add the missing files by hand, before you publish."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
