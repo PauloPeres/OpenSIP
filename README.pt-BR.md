@@ -26,7 +26,7 @@
 | **Windows** | [instalador `.exe` (x64, arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
 | **Linux** | [`.AppImage`](https://github.com/PauloPeres/OpenSIP/releases/latest) ou [`.deb`](https://github.com/PauloPeres/OpenSIP/releases/latest) (x64) |
 
-Todos os links levam à [última release](https://github.com/PauloPeres/OpenSIP/releases/latest). Nenhuma release foi publicada ainda; enquanto isso não acontece, essa página está vazia e o caminho é [Rodando a partir do código](#rodando-a-partir-do-código).
+Todos os links levam à [última release](https://github.com/PauloPeres/OpenSIP/releases/latest), hoje a v0.1.0. Se você prefere compilar por conta própria, ou quer alterar o código, [Rodando a partir do código](#rodando-a-partir-do-código) é o outro caminho.
 
 Os instaladores ainda não têm assinatura de código, então o sistema vai avisar na primeira vez:
 
@@ -273,7 +273,7 @@ testes unitários, e um teste de loopback UDP levou áudio nos dois sentidos sem
 
 O que essa única chamada **não** prova, e o que não foi confirmado separadamente: atender
 uma chamada recebida e ouvir áudio nos dois sentidos, e duas contas em uso ao mesmo tempo,
-com uma chamada em cada. Nenhuma release foi publicada ainda. O [plano de evolução](ROADMAP.md#português) lista
+com uma chamada em cada. A primeira release, a v0.1.0, foi publicada. O [plano de evolução](ROADMAP.md#português) lista
 cada um desses itens como cumprido ou não. A chamada só completou quando o `User-Agent` SIP
 era um que o provedor reconhece; veja [Solução de problemas](#solução-de-problemas).
 

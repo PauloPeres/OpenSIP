@@ -45,7 +45,7 @@ all met, and this document does not round them up.
 | Outbound call | **Working**: a real call connected. It needs a `User-Agent` the provider recognises and a number with its full prefix — see below |
 | Configurable SIP `User-Agent` | **Working**: **Settings → SIP User-Agent**, persisted, applied to the next message sent |
 | Call history and redial | **Delivered** — see Phase 1 |
-| Published release | **None yet** |
+| Published release | **v0.1.0**, published 4 November. Its macOS binaries were built locally, not in CI (see [docs/releasing.md](docs/releasing.md)) |
 | macOS signing | Ad-hoc signed, not Developer ID: the keychain prompts on each build and Gatekeeper warns on download |
 | macOS 26 icon | Restyled by the system, because the app does not ship the new Icon Composer format |
 
@@ -103,10 +103,10 @@ The MVP is done when, and only when, all four hold. Today:
 | 1 | A call to an external number is answered and **a person on the far end is heard, and hears the user**, in a real call on at least one account | **Met.** A real outbound call connected, with audio heard in both directions |
 | 2 | An incoming call is answered and carries audio both ways | **Not confirmed.** Inbound INVITEs have been received and answered with `180` in a test harness; no incoming call has been taken in the app with audio |
 | 3 | Two accounts are registered and in use at once, with a call on each | **Not confirmed.** Two accounts were registered simultaneously only in a throwaway test harness (3 November), not in the app; two simultaneous calls, one on each, have not been tried |
-| 4 | A first release is published | **Not met.** No release has been published |
+| 4 | A first release is published | **Met.** v0.1.0 is published, with macOS, Windows and Linux installers and the three updater manifests |
 
-So criterion 1 is met, criteria 2 and 3 are unconfirmed rather than failing, and criterion 4
-is outstanding. The MVP is therefore functionally complete but not yet closed.
+So criteria 1 and 4 are met, and criteria 2 and 3 are unconfirmed rather than failing. The MVP
+is therefore functionally complete but not yet closed.
 
 The phases below are ordered, and Phase 1 is delivered. Phase 2 is the current one. Phases 3
 and 4 are **ordered but not started**. Recording (Phase 3) depends on audio that is now
@@ -301,7 +301,7 @@ refused. The kill switch works mid-call. Covered by Gherkin scenarios.
 ### Order and dependencies
 
 ```
-MVP: working call path (blocker resolved, outbound audio heard; release not yet published)
+MVP: working call path (blocker resolved, outbound audio heard; first release published)
  |
  +--> 1. History and redial  [delivered] --+
  |                                         +--> 2. Contacts  [current]
@@ -338,7 +338,7 @@ plan.
 
 | Decision | Why it is open | What it blocks |
 | --- | --- | --- |
-| **MVP exit criteria 2–4** | A real outbound call connected, but answering a real incoming call with audio both ways, two accounts in simultaneous use, and a published first release are not yet confirmed or done. | Calling the MVP closed. |
+| **MVP exit criteria 2 and 3** | A real outbound call connected and the first release is published, but answering a real incoming call with audio both ways and two accounts in simultaneous use are not yet confirmed. | Calling the MVP closed. |
 | **Apple Developer ID certificate** | The macOS build is ad-hoc signed: the keychain asks for permission on each build and Gatekeeper warns on download. Signing and notarising needs a paid Apple Developer account. | A credible macOS release; also reliable TCC permissions for Contacts and the microphone. Also macOS auto-update (the app only notifies today). Costs 99 USD/year. TODO and steps in [docs/releasing.md](docs/releasing.md#todo-apple-developer-id-certificate). |
 | **macOS 26 icon format** | The app does not ship the new Icon Composer format, so macOS 26 restyles the icon. | Cosmetic only; can wait. |
 | **Recording consent model** | Audible notice, per-call consent, visible indicator, or a combination; and what "record all" means under it. | Phase 3. |
@@ -392,7 +392,7 @@ abaixo, nem todos foram cumpridos, e este documento não os arredonda para cima.
 | Chamada de saída | **Funcionando**: uma chamada real completou. Exige um `User-Agent` que o provedor reconheça e um número com o prefixo completo — veja abaixo |
 | `User-Agent` SIP configurável | **Funcionando**: **Configurações → User-Agent SIP**, persistido e aplicado à próxima mensagem enviada |
 | Histórico de chamadas e rediscagem | **Entregue** — veja a Fase 1 |
-| Release publicada | **Nenhuma ainda** |
+| Release publicada | **v0.1.0**, publicada em 4 de novembro. Os binários de macOS foram compilados localmente, não no CI (veja [docs/releasing.md](docs/releasing.md)) |
 | Assinatura no macOS | Assinada ad-hoc, não com Developer ID: o chaveiro pergunta a cada build e o Gatekeeper avisa no download |
 | Ícone no macOS 26 | Reestilizado pelo sistema, porque o app não traz o novo formato do Icon Composer |
 
@@ -454,11 +454,10 @@ O MVP está pronto quando, e somente quando, os quatro valem. Hoje:
 | 1 | Uma chamada para um número externo é atendida e **uma pessoa do outro lado é ouvida e ouve o usuário**, em uma chamada real e em pelo menos uma conta | **Cumprido.** Uma chamada de saída real completou, com áudio ouvido nos dois sentidos |
 | 2 | Uma chamada recebida é atendida e leva áudio nos dois sentidos | **Não confirmado.** INVITEs recebidos foram atendidos com `180` em um ambiente de teste; nenhuma chamada recebida foi atendida no app com áudio |
 | 3 | Duas contas estão registradas e em uso ao mesmo tempo, com uma chamada em cada | **Não confirmado.** Duas contas foram registradas simultaneamente apenas em um ambiente de teste descartável (3 de novembro), não no app; duas chamadas simultâneas, uma em cada, não foram tentadas |
-| 4 | Uma primeira release é publicada | **Não cumprido.** Nenhuma release foi publicada |
+| 4 | Uma primeira release é publicada | **Cumprido.** A v0.1.0 está publicada, com instaladores para macOS, Windows e Linux e os três manifestos de atualização |
 
-Assim, o critério 1 está cumprido, os critérios 2 e 3 estão não confirmados em vez de
-falhando, e o critério 4 está pendente. O MVP está, portanto, funcionalmente completo, mas
-ainda não encerrado.
+Assim, os critérios 1 e 4 estão cumpridos, e os critérios 2 e 3 estão não confirmados em
+vez de falhando. O MVP está, portanto, funcionalmente completo, mas ainda não encerrado.
 
 As fases abaixo estão ordenadas, e a Fase 1 está entregue. A Fase 2 é a atual. As Fases 3 e
 4 estão **ordenadas, mas não iniciadas**. A gravação (Fase 3) depende de áudio que agora
@@ -668,7 +667,7 @@ funciona no meio da chamada. Coberto por cenários Gherkin.
 ### Ordem e dependências
 
 ```
-MVP: caminho de chamada funcionando (bloqueio resolvido, áudio de saída ouvido; release ainda não publicada)
+MVP: caminho de chamada funcionando (bloqueio resolvido, áudio de saída ouvido; primeira release publicada)
  |
  +--> 1. Histórico e rediscagem  [entregue] --+
  |                                            +--> 2. Contatos  [atual]
@@ -706,8 +705,8 @@ plano.
 
 | Decisão | Por que está em aberto | O que bloqueia |
 | --- | --- | --- |
-| **Critérios de saída 2 a 4 do MVP** | Uma chamada de saída real completou, mas atender uma chamada recebida real com áudio nos dois sentidos, duas contas em uso simultâneo e uma primeira release publicada ainda não estão confirmados nem feitos. | Dar o MVP por encerrado. |
-| **Certificado Developer ID da Apple** | O build do macOS é assinado ad-hoc: o chaveiro pede permissão a cada build e o Gatekeeper avisa no download. Assinar e notarizar exige uma conta paga de desenvolvedor Apple. | Uma release crível para macOS; também permissões TCC confiáveis para Contatos e microfone. |
+| **Critérios de saída 2 e 3 do MVP** | Uma chamada de saída real completou e a primeira release está publicada, mas atender uma chamada recebida real com áudio nos dois sentidos e duas contas em uso simultâneo ainda não estão confirmados. | Dar o MVP por encerrado. |
+| **Certificado Developer ID da Apple** | O build do macOS é assinado ad-hoc: o chaveiro pede permissão a cada build e o Gatekeeper avisa no download. Assinar e notarizar exige uma conta paga de desenvolvedor Apple. | Uma release crível para macOS; também permissões TCC confiáveis para Contatos e microfone. E a atualização automática no macOS (hoje o app apenas avisa). Custa 99 USD/ano. TODO e passos em [docs/releasing.md](docs/releasing.md#todo-apple-developer-id-certificate). |
 | **Formato do ícone no macOS 26** | O app não traz o novo formato do Icon Composer, então o macOS 26 reestiliza o ícone. | Apenas estético; pode esperar. |
 | **Modelo de consentimento da gravação** | Aviso sonoro, consentimento por chamada, indicador visível ou uma combinação; e o que "gravar todas" significa sob ele. | Fase 3. |
 | **Gravações em repouso** | Se as gravações são criptografadas como as credenciais. O histórico foi decidido: sem criptografia, limitado a 500 entradas, com opção de limpar. | Fase 3. |

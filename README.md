@@ -26,7 +26,7 @@
 | **Windows** | [`.exe` installer (x64, arm64)](https://github.com/PauloPeres/OpenSIP/releases/latest) |
 | **Linux** | [`.AppImage`](https://github.com/PauloPeres/OpenSIP/releases/latest) or [`.deb`](https://github.com/PauloPeres/OpenSIP/releases/latest) (x64) |
 
-All links go to the [latest release](https://github.com/PauloPeres/OpenSIP/releases/latest). No release has been published yet, so until one is, that page is empty and the way in is [Run from source](#run-from-source).
+All links go to the [latest release](https://github.com/PauloPeres/OpenSIP/releases/latest), currently v0.1.0. If you would rather build it yourself, or want to change it, [Run from source](#run-from-source) is the other way in.
 
 The installers are not code-signed yet, so your system will warn you the first time:
 
@@ -264,7 +264,7 @@ loopback test carried audio both ways with zero loss.
 
 What that one call does **not** prove, and what has not been confirmed separately:
 answering an incoming call and hearing audio both ways, and two accounts in use at once,
-with a call on each. No release has been published yet. The roadmap lists each of these
+with a call on each. The first release, v0.1.0, is published. The roadmap lists each of these
 as met or not met. The call only completed once the SIP `User-Agent` was one the provider
 recognised; see [Troubleshooting](#troubleshooting).
 

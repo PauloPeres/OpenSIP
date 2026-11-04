@@ -65,7 +65,44 @@ Needed secrets: only `GITHUB_TOKEN`, which GitHub provides. The workflow asks fo
 updater finds nothing, so installed apps are untouched and you can inspect, edit or
 delete the draft freely. After publishing, a release's metadata should not change; to
 fix a bad release, publish a higher version. The "No published versions on GitHub" log
-line on a first run just means no release has been published yet.
+line means no release has been published yet, so it should not appear now that v0.1.0 is
+published.
+
+## What the first release taught us
+
+v0.1.0 was published on 4 November 2026. It did not go through the workflow cleanly, and
+the next release will meet the same things.
+
+- **GitHub did not allocate a macOS runner.** Across three attempts, each run was
+  cancelled after exactly 15 minutes in the queue, with no runner assigned and no step
+  started. The same job had succeeded in 1m35s the day before, so this was capacity on
+  GitHub's side, not configuration. Ubuntu and Windows got runners within seconds in the
+  same runs. The `timeout-minutes` values above do not help here: nothing had started.
+- **The macOS binaries in v0.1.0 were built locally**, not in CI, and uploaded to the
+  draft, using the same `electron-builder` command the workflow runs. This is not ideal: a
+  locally built artifact is less reproducible than one built on a clean CI runner, and it
+  depends on the state of one machine. The Windows and Linux binaries came from the workflow.
+- **A trap when uploading by hand.** A local build names files with spaces
+  (`Open SIP Phone-0.1.0-mac-arm64.dmg`), while `latest-mac.yml` references hyphenated
+  names (`Open-SIP-Phone-0.1.0-mac-arm64.dmg`). Uploaded unrenamed, the files would sit in
+  the release and the updater would fetch URLs that return 404: a silent failure. If you
+  repeat a manual upload, rename the files first, then check that every URL in each
+  `latest*.yml` resolves to a real asset. For v0.1.0 every download URL was checked and
+  returned HTTP 200.
+
+### Known problems in the workflow
+
+Recorded, not fixed. Changing `.github/workflows/` is a decision for the owner.
+
+1. **Deleting a tag also triggers the release workflow.** Recycling a tag (delete it,
+   push it again on a new commit) therefore starts two runs for one commit, one for the
+   deletion and one for the push. During v0.1.0 one of them had to be cancelled by hand.
+   Prefer a new version over recycling a tag, and check **Actions** after any tag change.
+2. **`verify-draft` fails the run when any artifact is missing.** An infrastructure
+   outage, such as the missing macOS runner above, therefore blocks a release that is
+   ready for two of the three platforms. There is no way to accept a partial draft short of
+   uploading the missing files by hand (see the trap above) or publishing despite the
+   red run.
 
 ## What the app does with a release
 
@@ -95,9 +132,9 @@ macOS to automatic updates with no code or flag change.
    Windows/Linux the Settings text moves to "downloaded" and the new version installs on
    quit. On macOS the status bar shows "Update X available" and the button opens the
    release page. The process log (stderr, visible when launched from a terminal) prints `update mode: auto` or `notify`.
-5. To test the first release itself there is no earlier version to update from, so
-   confirm the draft's installers launch and that Settings reports "You are up to date"
-   once published.
+5. v0.1.0 had no earlier version to update from, so the only check available was that
+   its installers launch and that Settings reports "You are up to date". From the next
+   release on, v0.1.0 is the version to update from, so steps 3 and 4 apply in full.
 
 ## TODO: Apple Developer ID certificate
 
