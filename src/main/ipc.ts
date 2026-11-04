@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, clipboard, ipcMain, shell, systemPreferences } from 'electron';
 import { createDiagnosticsLog } from '@core/diagnostics';
+import { appendRecord, clearHistory, removeRecord } from '@core/history';
+import type { CallRecord } from '@core/history';
 import { isSupportedLocale, resolveLocale } from '@core/i18n';
 import type { Locale } from '@core/i18n';
 import { parseEnvAccounts } from '@core/config/env-accounts';
@@ -39,9 +41,15 @@ class Controller {
   /** The one diagnostics log of the app; the engine writes to it, snapshots read from it. */
   readonly diagnostics = createDiagnosticsLog();
   readonly media = createMediaBridge(electronMediaDeps());
-  readonly engine = new SipEngine({ diagnostics: this.diagnostics, media: this.media });
+  readonly engine = new SipEngine({
+    diagnostics: this.diagnostics,
+    media: this.media,
+    onCallRecorded: (record): void => this.recordCall(record)
+  });
   store: AccountStoreState = emptyAccountStore;
   locale: Locale = resolveLocale(app.getLocale());
+  history: readonly CallRecord[] = [];
+  private writing: Promise<void> = Promise.resolve();
   private cooling = false;
   private dirty = false;
 
@@ -67,7 +75,8 @@ class Controller {
       calls: this.engine.getCallViews(),
       locale: this.locale,
       logs: this.diagnostics.entries(),
-      debugLogging: this.diagnostics.debug
+      debugLogging: this.diagnostics.debug,
+      history: this.history
     };
   }
 
@@ -106,8 +115,32 @@ class Controller {
     ticker.unref();
   }
 
-  async persist(): Promise<void> {
-    await saveState({ accounts: this.store, locale: this.locale, debugLogging: this.diagnostics.debug });
+  /** Writes are queued, so two changes in quick succession never interleave in the file. */
+  persist(): Promise<void> {
+    const write = this.writing.then(() =>
+      saveState({ accounts: this.store, locale: this.locale, debugLogging: this.diagnostics.debug, history: this.history })
+    );
+    this.writing = write.catch((error: unknown) => log('warn', `could not save state: ${String(error)}`));
+    return write;
+  }
+
+  /** The engine reports each call once, when it ends. */
+  recordCall(record: CallRecord): void {
+    this.history = appendRecord(this.history, record);
+    this.persist().catch(() => undefined);
+    this.broadcast();
+  }
+
+  async removeHistoryEntry(id: string): Promise<void> {
+    this.history = removeRecord(this.history, id);
+    await this.persist();
+    this.broadcast();
+  }
+
+  async clearHistory(): Promise<void> {
+    this.history = clearHistory();
+    await this.persist();
+    this.broadcast();
   }
 
   async setDebugLogging(enabled: boolean): Promise<boolean> {
@@ -269,6 +302,13 @@ function registerLogHandlers(controller: Controller): void {
   ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
 }
 
+function registerHistoryHandlers(controller: Controller): void {
+  ipcMain.handle(IPC.clearHistory, () => controller.clearHistory());
+  ipcMain.handle(IPC.removeHistoryEntry, (_event, id: unknown): Promise<void> =>
+    typeof id === 'string' ? controller.removeHistoryEntry(id) : Promise.reject(new Error('invalid-argument'))
+  );
+}
+
 function registerCallHandlers(controller: Controller): void {
   const { engine } = controller;
   const actions: readonly (readonly [string, CallAction])[] = [
@@ -293,6 +333,7 @@ function registerHandlers(controller: Controller): void {
   registerCallHandlers(controller);
   registerMediaHandlers(controller);
   registerLogHandlers(controller);
+  registerHistoryHandlers(controller);
   registerClipboardHandler();
   registerSystemSettingsHandler();
   registerMicPermissionHandler();
@@ -304,6 +345,7 @@ export async function registerIpc(): Promise<void> {
   controller.store = persisted.accounts;
   if (persisted.locale !== undefined) controller.locale = persisted.locale;
   controller.diagnostics.setDebug(persisted.debugLogging === true);
+  controller.history = persisted.history ?? [];
   controller.seed();
   await controller.persist();
   controller.engine.onChange(() => controller.broadcast());

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDiagnosticsLog } from '../../src/core/diagnostics';
+import type { CallRecord } from '../../src/core/history';
 import { createAccount, headerValue } from '../../src/core/sip';
 import type { SipMessage, SipRequest, SipResponse, TransportCandidate } from '../../src/core/sip';
 import type { SipConnection } from '../../src/main/sip/connection';
@@ -68,18 +69,22 @@ function answerInvite(m: SipRequest): SipResponse {
 /** The inbound RTP packet count the fake media session reports; a test moves it to stand for audio arriving. */
 const media = { rx: 0 };
 
-type ScriptedRig = Rig & { script: { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean } };
+type Script = { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean; invite: (m: SipRequest) => SipResponse[]; rtpFails: boolean };
+type ScriptedRig = Rig & { script: Script };
 
-interface Rig { engine: SipEngine; links: Link[]; diagnostics: ReturnType<typeof createDiagnosticsLog>; opens: () => number; failOpen: { next: boolean } }
+interface Rig { records: CallRecord[]; engine: SipEngine; links: Link[]; diagnostics: ReturnType<typeof createDiagnosticsLog>; opens: () => number; failOpen: { next: boolean } }
 
 /** Every REGISTER gets `registerStatus`; a ping is answered, and OPTIONS gets 200, unless `quiet` is set. */
 const rig = (transport: TransportCandidate['transport'] = 'tcp'): ScriptedRig => {
   const links: Link[] = [];
   const failOpen = { next: false };
   // Annotated so an override may take the attempt count; the default ignores it.
-  const script: { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean } = {
+  const records: CallRecord[] = [];
+  const script: Script = {
     register: (m: SipRequest): SipResponse => reply(m, 200, { expires: ['300'] }),
-    quiet: false
+    quiet: false,
+    invite: (m: SipRequest): SipResponse[] => [answerInvite(m)],
+    rtpFails: false
   };
   const diagnostics = createDiagnosticsLog({ debug: false });
   const engine = new SipEngine({
@@ -89,7 +94,7 @@ const rig = (transport: TransportCandidate['transport'] = 'tcp'): ScriptedRig =>
       const link = new Link(transport);
       link.respond = (m) => {
         if (m.method === 'REGISTER') return [script.register(m, links.flatMap((l) => l.requests('REGISTER')).length)];
-        if (m.method === 'INVITE') return [answerInvite(m)];
+        if (m.method === 'INVITE') return script.invite(m);
         return m.method === 'OPTIONS' && !script.quiet ? [reply(m, 200)] : [];
       };
       link.quiet = () => script.quiet;
@@ -97,15 +102,16 @@ const rig = (transport: TransportCandidate['transport'] = 'tcp'): ScriptedRig =>
       return link.connection;
     },
     diagnostics, media: noMedia as never, random: () => 0.5,
+    onCallRecorded: (record: CallRecord) => { records.push(record); },
     rtp: {
-      allocatePort: async () => 20000,
+      allocatePort: async () => { if (script.rtpFails) throw new Error('no ports'); return 20000; },
       create: () => ({
         sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), setHeld: vi.fn(), close: vi.fn(),
         localPort: 20000, get stats() { return { rxPackets: media.rx, txPackets: 0, lostPackets: 0, muted: false }; }
       }) as never
     }
   });
-  return { engine, links, diagnostics, opens: () => links.length, failOpen, script };
+  return { records, engine, links, diagnostics, opens: () => links.length, failOpen, script };
 };
 
 const account = createAccount({ displayName: 'Me', username: '1000', password: 'secret', domain: 'pbx.test' }, 'acc1');
@@ -599,5 +605,159 @@ describe('resumeAllEngines (the powerMonitor hook)', () => {
     resumeAllEngines();
     await advance(1);
     expect(registers(r).filter((m) => headerValue(m.headers, 'expires') !== '0')).toHaveLength(2);
+  });
+});
+
+describe('call history records', () => {
+  const callId = (r: Rig): string => r.engine.getCallViews()[0]?.call.id as string;
+
+  const inviteFrom = (from: string, callIdValue = 'in-1'): SipRequest => ({
+    kind: 'request', method: 'INVITE', uri: 'sip:1000@pbx.test', body: SDP,
+    headers: {
+      via: ['SIP/2.0/UDP pbx.test;branch=z9hG4bKin1'], from: [`${from};tag=remote1`], to: ['<sip:1000@pbx.test>'],
+      'call-id': [callIdValue], cseq: ['1 INVITE'], contact: ['<sip:alice@203.0.113.9:5060>'], 'content-type': ['application/sdp']
+    }
+  });
+
+  const cancel = (invite: SipRequest): SipRequest => ({
+    kind: 'request', method: 'CANCEL', uri: invite.uri, body: '',
+    headers: { ...invite.headers, cseq: ['1 CANCEL'], 'content-type': [] }
+  });
+
+  const bye = (invite: SipRequest): SipRequest => ({
+    kind: 'request', method: 'BYE', uri: invite.uri, body: '', headers: { ...invite.headers, cseq: ['2 BYE'] }
+  });
+
+  async function ringing(from = '"Alice" <sip:alice@pbx.test>'): Promise<{ r: ScriptedRig; invite: SipRequest }> {
+    const r = rig();
+    await start(r);
+    const invite = inviteFrom(from);
+    r.links[0]?.inject(invite);
+    await advance(1);
+    return { r, invite };
+  }
+
+  it('writes nothing while a call is in progress', async () => {
+    const r = rig();
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    expect(r.engine.getCallViews()[0]?.call.state).toBe('active');
+    expect(r.records).toEqual([]);
+  });
+
+  it('writes one answered record when an outbound call that connected is hung up', async () => {
+    const r = rig();
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    await advance(5_000);
+    const id = callId(r);
+    await r.engine.hangup(id);
+    await expect(r.engine.hangup(id)).rejects.toThrow();
+    expect(r.records).toHaveLength(1);
+    const [record] = r.records;
+    expect(record).toMatchObject({ accountId: 'acc1', direction: 'outbound', remoteIdentity: 'sip:1001@pbx.test', outcome: 'answered' });
+    expect((record?.endedAt ?? 0) - (record?.connectedAt ?? 0)).toBeGreaterThanOrEqual(5_000);
+    expect(record?.startedAt).toBeLessThanOrEqual(record?.connectedAt ?? -1);
+  });
+
+  it('writes a cancelled record when the user hangs up before an outbound call is answered', async () => {
+    const r = rig();
+    r.script.invite = (m) => [reply(m, 180)];
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    await r.engine.hangup(callId(r));
+    expect(r.records.map((x) => x.outcome)).toEqual(['cancelled']);
+    expect(r.records[0]).not.toHaveProperty('connectedAt');
+  });
+
+  it('writes a failed record, with the reason, when the far end refuses an outbound call', async () => {
+    const r = rig();
+    r.script.invite = (m) => [reply(m, 486)];
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    expect(r.records).toHaveLength(1);
+    expect(r.records[0]).toMatchObject({ outcome: 'failed', endReasonKey: 'calls.endReason.busy' });
+  });
+
+  it('writes a failed record when the setup guard gives up on an unanswered call', async () => {
+    const r = rig();
+    r.script.invite = (m) => [reply(m, 100)];
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(91_000);
+    expect(r.records).toHaveLength(1);
+    expect(r.records[0]).toMatchObject({ outcome: 'failed', endReasonKey: 'calls.endReason.setupTimeout' });
+  });
+
+  it('writes a failed record, not a cancelled one, when the call could not even be started', async () => {
+    const r = rig();
+    await start(r);
+    r.script.rtpFails = true;
+    await r.engine.dial('acc1', '1001');
+    expect(r.records.map((x) => x.outcome)).toEqual(['failed']);
+  });
+
+  it('writes a missed record when the caller gives up while it rings', async () => {
+    const { r, invite } = await ringing();
+    expect(r.records).toEqual([]);
+    r.links[0]?.inject(cancel(invite));
+    expect(r.records).toHaveLength(1);
+    expect(r.records[0]).toMatchObject({ id: 'in-1', direction: 'inbound', remoteIdentity: 'Alice', outcome: 'missed' });
+  });
+
+  it('writes a rejected record when the user declines', async () => {
+    const { r } = await ringing();
+    await r.engine.reject('in-1');
+    expect(r.records.map((x) => x.outcome)).toEqual(['rejected']);
+  });
+
+  it('counts a hang-up of a ringing call as a rejection', async () => {
+    const { r } = await ringing();
+    await r.engine.hangup('in-1');
+    expect(r.records.map((x) => x.outcome)).toEqual(['rejected']);
+  });
+
+  it('writes an answered record when an inbound call that was answered is ended by the far end', async () => {
+    const { r, invite } = await ringing('<sip:alice@pbx.test>');
+    await r.engine.answer('in-1');
+    await advance(50);
+    r.links[0]?.inject({ kind: 'request', method: 'ACK', uri: invite.uri, body: '', headers: { ...invite.headers, cseq: ['1 ACK'] } });
+    await advance(50);
+    expect(r.engine.getCallViews()[0]?.call.state).toBe('active');
+    r.links[0]?.inject(bye(invite));
+    expect(r.records).toHaveLength(1);
+    expect(r.records[0]).toMatchObject({ direction: 'inbound', remoteIdentity: 'alice@pbx.test', outcome: 'answered' });
+    expect(r.records[0]?.connectedAt).toBeDefined();
+  });
+
+  it('writes a failed record when an inbound call is answered but ends before audio is up', async () => {
+    const { r, invite } = await ringing();
+    await r.engine.answer('in-1');
+    r.links[0]?.inject(bye(invite));
+    expect(r.records.map((x) => x.outcome)).toEqual(['failed']);
+  });
+
+  it('writes one record for a call that ends when its account is turned off', async () => {
+    const r = rig();
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    await r.engine.stopAccount('acc1');
+    expect(r.records.map((x) => x.outcome)).toEqual(['answered']);
+  });
+
+  it('does not repeat a record when the ended call is still shown in the status bar', async () => {
+    const r = rig();
+    r.script.invite = (m) => [reply(m, 486)];
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    expect(r.engine.getCallViews()).toHaveLength(1);
+    await advance(20_000);
+    expect(r.records).toHaveLength(1);
   });
 });

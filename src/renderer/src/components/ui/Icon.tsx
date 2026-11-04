@@ -9,7 +9,11 @@ export type IconName =
   | 'backspace'
   | 'sliders'
   | 'users'
-  | 'list';
+  | 'list'
+  | 'clock'
+  | 'arrowIn'
+  | 'arrowOut'
+  | 'trash';
 
 // i18n-exempt: SVG path data
 const HANDSET = 'M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z';
@@ -34,7 +38,15 @@ const PATHS: Readonly<Record<IconName, string>> = {
   // i18n-exempt: SVG path data
   users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',
   // i18n-exempt: SVG path data
-  list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'
+  list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+  // i18n-exempt: SVG path data
+  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2',
+  // i18n-exempt: SVG path data
+  arrowIn: 'M17 7L7 17M17 17H7V7',
+  // i18n-exempt: SVG path data
+  arrowOut: 'M7 17L17 7M7 7h10v10',
+  // i18n-exempt: SVG path data
+  trash: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5'
 };
 
 export function Icon({ name }: { readonly name: IconName }): JSX.Element {

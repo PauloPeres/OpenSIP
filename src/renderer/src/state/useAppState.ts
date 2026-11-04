@@ -25,6 +25,8 @@ export interface AppActions {
   readonly mute: (callId: string, muted: boolean) => Promise<void>;
   readonly setDebug: (enabled: boolean) => Promise<boolean>;
   readonly clearLogs: () => Promise<void>;
+  readonly clearHistory: () => Promise<void>;
+  readonly removeHistoryEntry: (id: string) => Promise<void>;
 }
 
 export interface AppState {
@@ -49,7 +51,9 @@ function buildActions(): AppActions {
     dtmf: (id, digit) => api.sendDtmf(id, digit),
     mute: (id, muted) => api.setMuted(id, muted),
     setDebug: (enabled) => api.setDebugLogging(enabled),
-    clearLogs: () => api.clearLogs()
+    clearLogs: () => api.clearLogs(),
+    clearHistory: () => api.clearHistory(),
+    removeHistoryEntry: (id) => api.removeHistoryEntry(id)
   };
 }
 

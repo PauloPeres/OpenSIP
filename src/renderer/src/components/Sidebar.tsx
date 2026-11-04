@@ -8,10 +8,11 @@ import { cx } from './ui/cx';
 import { Icon } from './ui/Icon';
 import type { IconName } from './ui/Icon';
 
-export type ViewId = 'calls' | 'accounts' | 'logs' | 'settings';
+export type ViewId = 'calls' | 'history' | 'accounts' | 'logs' | 'settings';
 
 const NAV: readonly { readonly id: ViewId; readonly labelKey: string; readonly icon: IconName }[] = [
   { id: 'calls', labelKey: 'nav.calls', icon: 'phone' },
+  { id: 'history', labelKey: 'nav.history', icon: 'clock' },
   { id: 'accounts', labelKey: 'nav.accounts', icon: 'users' },
   { id: 'logs', labelKey: 'nav.logs', icon: 'list' },
   { id: 'settings', labelKey: 'nav.settings', icon: 'sliders' }

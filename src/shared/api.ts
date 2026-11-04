@@ -1,4 +1,5 @@
 import type { LogEntry } from '@core/diagnostics';
+import type { CallRecord } from '@core/history';
 import type { Locale } from '@core/i18n';
 import type {
   AccountId,
@@ -28,6 +29,8 @@ export const IPC = {
   setLocale: 'opensip:locale:set',
   setDebugLogging: 'opensip:logs:debug',
   clearLogs: 'opensip:logs:clear',
+  clearHistory: 'opensip:history:clear',
+  removeHistoryEntry: 'opensip:history:remove',
   copyText: 'opensip:clipboard:copy',
   openSystemSettings: 'opensip:system:settings',
   micPermission: 'opensip:system:mic',
@@ -78,6 +81,13 @@ export interface AccountSharing {
   readonly displaced: boolean;
 }
 
+/*
+ * The history contract lives in src/core/history so the core never imports from
+ * the shared layer; it is re-exported here, which is where the processes read it.
+ */
+export { MAX_HISTORY_ENTRIES } from '@core/history';
+export type { CallOutcome, CallRecord } from '@core/history';
+
 export interface AppSnapshot {
   readonly accounts: readonly AccountView[];
   readonly calls: readonly CallView[];
@@ -85,6 +95,8 @@ export interface AppSnapshot {
   /** Oldest first, capped at DEFAULT_LOG_CAPACITY entries. */
   readonly logs: readonly LogEntry[];
   readonly debugLogging: boolean;
+  /** Finished calls, newest first, capped at MAX_HISTORY_ENTRIES. */
+  readonly history: readonly CallRecord[];
 }
 
 /** Why a dial was refused because the same account is still setting up another outbound call. */
@@ -145,6 +157,8 @@ export interface OpenSipApi {
   /** Turns raw SIP message capture on or off; returns the resulting state. */
   setDebugLogging(enabled: boolean): Promise<boolean>;
   clearLogs(): Promise<void>;
+  clearHistory(): Promise<void>;
+  removeHistoryEntry(id: string): Promise<void>;
   /** Puts plain text on the system clipboard from the main process; resolves false when it was refused. */
   copyText(text: string): Promise<boolean>;
   /** Opens the OS microphone privacy pane. Takes no argument: the target is fixed in the main process. */

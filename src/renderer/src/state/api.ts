@@ -1,6 +1,6 @@
 import type { AppSnapshot, OpenSipApi } from '../../../shared/api';
 
-const EMPTY: AppSnapshot = { accounts: [], calls: [], locale: 'en', logs: [], debugLogging: false };
+const EMPTY: AppSnapshot = { accounts: [], calls: [], locale: 'en', logs: [], debugLogging: false, history: [] };
 
 const none = (): Promise<void> => Promise.resolve();
 const noop = (): void => undefined;
@@ -24,6 +24,8 @@ const OFFLINE_API: OpenSipApi = {
   setLocale: (locale) => Promise.resolve(locale),
   setDebugLogging: (enabled) => Promise.resolve(enabled),
   clearLogs: none,
+  clearHistory: none,
+  removeHistoryEntry: none,
   copyText: () => Promise.resolve(false),
   openSystemSettings: none,
   micPermission: () => Promise.resolve('unknown'),
@@ -37,7 +39,7 @@ export function getApi(): OpenSipApi {
 
 /** Older main processes may not send every field yet; fill the gaps so the UI never crashes. */
 export function normalizeSnapshot(raw: AppSnapshot): AppSnapshot {
-  return { ...raw, logs: raw.logs ?? [], debugLogging: raw.debugLogging ?? false };
+  return { ...raw, logs: raw.logs ?? [], debugLogging: raw.debugLogging ?? false, history: raw.history ?? [] };
 }
 
 export const EMPTY_SNAPSHOT = EMPTY;

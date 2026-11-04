@@ -13,6 +13,8 @@
 import { createHash } from 'node:crypto';
 import { createDiagnosticsLog } from '@core/diagnostics';
 import type { DiagnosticsLog, LogLevel } from '@core/diagnostics';
+import { CallJournal } from '@core/history';
+import type { CallRecord } from '@core/history';
 import { PCMA_PAYLOAD_TYPE, PCMU_PAYLOAD_TYPE } from '@core/rtp';
 import {
   ConcurrentCallLimitError,
@@ -54,6 +56,7 @@ import type {
   CallEvent,
   CallRegistry,
   CallSession,
+  CallState,
   KeepaliveState,
   RegistrationEvent,
   RegistrationFailure,
@@ -193,6 +196,8 @@ export interface EngineDeps {
   readonly media: MediaBridge;
   readonly rtp: RtpFactory;
   readonly now: () => number;
+  /** Called once for each call, when it ends. The engine keeps no history itself. */
+  readonly onCallRecorded: (record: CallRecord) => void;
   /** In [0, 1); injected so the jitter of the retry backoff is testable. */
   readonly random: () => number;
 }
@@ -537,6 +542,7 @@ const defaultDeps = (): EngineDeps => ({
   media: noMedia,
   rtp: defaultRtp,
   now: () => Date.now(),
+  onCallRecorded: () => undefined,
   random: () => Math.random()
 });
 
@@ -606,6 +612,7 @@ export class SipEngine {
   private readonly dialogs = new Map<string, Dialog>();
   private readonly tracks = new Map<string, CallTrack>();
   private registry: CallRegistry = emptyCallRegistry;
+  private readonly journal = new CallJournal();
   private readonly listeners = new Set<Listener>();
   private readonly deps: EngineDeps;
   private readonly stopCapture: () => void;
@@ -821,6 +828,8 @@ export class SipEngine {
   private openOutgoing(params: { id: string; accountId: AccountId; target: string }): string | undefined {
     try {
       this.registry = outgoingCall(this.registry, params);
+      const { id, accountId, target } = params;
+      this.journal.begin({ id, accountId, direction: 'outbound', remoteIdentity: target }, this.deps.now());
       return undefined;
     } catch (error) {
       if (error instanceof ConcurrentCallLimitError) return 'calls.error.limitReached';
@@ -835,6 +844,7 @@ export class SipEngine {
       this.transmitInvite(dialog, dialog.invite, UNSIGNED);
       dialog.setup = this.startSetupGuard(dialog);
     } catch (error) {
+      this.journal.markFailed(callId);
       this.dispatchCall(callId, { type: 'hangup' });
       this.note(entry.account.id, CALL_FAILED_KEY, { level: 'warn', params: { reason: technical(error) } });
       return fail(CALL_FAILED_KEY);
@@ -974,6 +984,7 @@ export class SipEngine {
   /** A 2xx we cannot use, or one that crossed our CANCEL: acknowledge it, then hang up at once. */
   private endAnswered(dialog: Dialog): void {
     if (!dialog.cancelled) {
+      this.journal.markFailed(dialog.callId);
       this.dispatchCall(dialog.callId, { type: 'hangup' });
       this.note(dialog.entry.account.id, CALL_FAILED_KEY, { level: 'warn' });
     }
@@ -1017,6 +1028,7 @@ export class SipEngine {
 
   private abandon(dialog: Dialog, reason: string): void {
     log('warn', `abandoning call ${dialog.callId}: ${reason}`);
+    this.journal.markFailed(dialog.callId);
     this.dispatchCall(dialog.callId, { type: 'hangup' });
     this.releaseDialog(dialog);
     this.reply(dialog, 500, 'Server Internal Error').catch(this.logSend);
@@ -1500,6 +1512,7 @@ export class SipEngine {
     try {
       const remoteIdentity = identityOf(first(request.headers, 'from'));
       this.registry = incomingCall(this.registry, { id: callId, accountId: entry.account.id, remoteIdentity });
+      this.journal.begin({ id: callId, accountId: entry.account.id, direction: 'inbound', remoteIdentity }, this.deps.now());
     } catch (error) {
       log('warn', `rejecting incoming call: ${String(error)}`);
       return this.respond(entry, request, 486, 'Busy Here');
@@ -1653,8 +1666,10 @@ export class SipEngine {
 
   private dispatchCall(callId: string, event: CallEvent): boolean {
     try {
+      const before = this.registry[callId]?.state;
       this.registry = applyCallEvent(this.registry, callId, event);
       this.markConnected(callId);
+      if (before !== undefined) this.record(callId, before, event);
       this.dropSilentEnd(callId);
       return true;
     } catch (error) {
@@ -1663,6 +1678,15 @@ export class SipEngine {
     } finally {
       this.emit();
     }
+  }
+
+  /** Hands the journal the step just taken; it answers with a record exactly once, when the call has ended. */
+  private record(callId: string, before: CallState, event: CallEvent): void {
+    const after = this.registry[callId]?.state ?? before;
+    const endReasonKey = this.tracks.get(callId)?.endReasonKey;
+    const step = { callId, before, after, event: event.type, at: this.deps.now() };
+    const record = this.journal.observe(endReasonKey === undefined ? step : { ...step, endReasonKey });
+    if (record !== undefined) this.deps.onCallRecorded(record);
   }
 
   /** An ended call with nothing to tell the user leaves no trace. */
