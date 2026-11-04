@@ -35,8 +35,8 @@ win:
       arch: [x64, arm64]
 linux:
   icon: build/icon.png
-  # .deb requires a maintainer and package.json's author has no email.
-  maintainer: Open SIP Phone Contributors <noreply@github.com>
+  # .deb requires a maintainer with an email address.
+  maintainer: Paulo Peres <p.peresjr@gmail.com>
   category: Network
   target:
     - target: AppImage
