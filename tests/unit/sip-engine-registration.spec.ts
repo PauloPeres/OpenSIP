@@ -68,6 +68,8 @@ function answerInvite(m: SipRequest): SipResponse {
 
 /** The inbound RTP packet count the fake media session reports; a test moves it to stand for audio arriving. */
 const media = { rx: 0 };
+/** Every RTP session the engine opened, with its close spy, so a test can tell a restart from a kept stream. */
+const rtpOpened: { close: ReturnType<typeof vi.fn>; setMuted: ReturnType<typeof vi.fn>; options: Record<string, unknown> }[] = [];
 
 type Script = { register: (m: SipRequest, n: number) => SipResponse; quiet: boolean; invite: (m: SipRequest) => SipResponse[]; rtpFails: boolean };
 type ScriptedRig = Rig & { script: Script };
@@ -105,10 +107,14 @@ const rig = (transport: TransportCandidate['transport'] = 'tcp'): ScriptedRig =>
     onCallRecorded: (record: CallRecord) => { records.push(record); },
     rtp: {
       allocatePort: async () => { if (script.rtpFails) throw new Error('no ports'); return 20000; },
-      create: () => ({
-        sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), setHeld: vi.fn(), close: vi.fn(),
-        localPort: 20000, get stats() { return { rxPackets: media.rx, txPackets: 0, lostPackets: 0, muted: false }; }
-      }) as never
+      create: (options: unknown) => {
+        const session = {
+          sendPcm: vi.fn(), onPcm: vi.fn(() => () => undefined), sendDtmf: vi.fn(), setMuted: vi.fn(), setHeld: vi.fn(), close: vi.fn(),
+          localPort: 20000, get stats() { return { rxPackets: media.rx, txPackets: 0, lostPackets: 0, muted: false }; }
+        };
+        rtpOpened.push({ close: session.close, setMuted: session.setMuted, options: options as Record<string, unknown> });
+        return session as never;
+      }
     }
   });
   return { records, engine, links, diagnostics, opens: () => links.length, failOpen, script };
@@ -127,7 +133,7 @@ const advanceUntil = async (done: () => boolean): Promise<void> => {
 };
 const start = async (r: Rig): Promise<void> => { await r.engine.startAccount(account); await advance(1); };
 
-beforeEach(() => { media.rx = 0; vi.useFakeTimers(); });
+beforeEach(() => { media.rx = 0; rtpOpened.length = 0; noMedia.start.mockClear(); noMedia.stop.mockClear(); vi.useFakeTimers(); });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
 describe('registration retry', () => {
@@ -813,5 +819,134 @@ describe('call history records', () => {
     expect(r.engine.getCallViews()).toHaveLength(1);
     await advance(20_000);
     expect(r.records).toHaveLength(1);
+  });
+});
+
+/* ------------------------------------------------------------ early media */
+
+const sdpAt = (port: number, codec = 8): string => SDP.replace('40000', String(port)).replace('RTP/AVP 8 101', `RTP/AVP ${codec} 101`);
+const withSdp = (m: SipRequest, status: number, port = 40000): SipResponse => ({ ...reply(m, status, { 'content-type': ['application/sdp'] }), body: sdpAt(port) });
+const progressOf = (r: Rig): string | undefined => r.engine.getCallViews()[0]?.progress;
+
+describe('early media on a provisional response', () => {
+  const place = async (r: ScriptedRig, scripted: (m: SipRequest) => SipResponse[]): Promise<void> => {
+    r.script.invite = scripted;
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+  };
+
+  it('starts the inbound media path on a 183 that carries an answer', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183)]);
+    expect(rtpOpened).toHaveLength(1);
+    expect(rtpOpened[0]?.options).toMatchObject({ remoteHost: '203.0.113.9', remotePort: 40000, payloadType: 8 });
+    expect(noMedia.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts nothing on a 180 without a body', async () => {
+    const r = rig();
+    await place(r, (m) => [reply(m, 180)]);
+    expect(rtpOpened).toHaveLength(0);
+    expect(noMedia.start).not.toHaveBeenCalled();
+  });
+
+  it('ignores a 183 whose body cannot be used', async () => {
+    const r = rig();
+    await place(r, (m) => [{ ...reply(m, 183, { 'content-type': ['application/sdp'] }), body: 'garbage' }]);
+    expect(rtpOpened).toHaveLength(0);
+    expect(progressOf(r)).toBe('calls.progress.ringing');
+  });
+
+  it('keeps the call ringing, not active, and exposes the stream so the UI knows early media is playing', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183)]);
+    const [view] = r.engine.getCallViews();
+    expect(view?.progress).toBe('calls.progress.ringing');
+    expect(view?.call.state).not.toBe('active');
+    expect(view?.media).toBeDefined();
+  });
+
+  it('never sends the microphone before the call is answered', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183)]);
+    expect(rtpOpened[0]?.setMuted).toHaveBeenLastCalledWith(true);
+  });
+
+  it('does not open a second stream for a repeated 183 with the same answer', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), withSdp(m, 183)]);
+    expect(rtpOpened).toHaveLength(1);
+    expect(rtpOpened[0]?.close).not.toHaveBeenCalled();
+  });
+
+  it('moves the stream when a later provisional names another port', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), withSdp(m, 183, 41000)]);
+    expect(rtpOpened).toHaveLength(2);
+    expect(rtpOpened[0]?.close).toHaveBeenCalledTimes(1);
+    expect(rtpOpened[1]?.options).toMatchObject({ remotePort: 41000 });
+  });
+
+  it('keeps the very same stream when the 200 OK repeats the 183 answer, and only then goes active', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), { ...answerInvite(m), body: sdpAt(40000) }]);
+    expect(rtpOpened).toHaveLength(1);
+    expect(rtpOpened[0]?.close).not.toHaveBeenCalled();
+    expect(noMedia.start).toHaveBeenCalledTimes(1);
+    expect(noMedia.stop).not.toHaveBeenCalled();
+    expect(progressOf(r)).toBe('calls.progress.active');
+    expect(r.engine.getCallViews()[0]?.call.state).toBe('active');
+  });
+
+  it('unmutes the stream once the call is answered', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), answerInvite(m)]);
+    expect(rtpOpened[0]?.setMuted).toHaveBeenLastCalledWith(false);
+  });
+
+  it('rebuilds the stream when the 200 OK moves the media', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), { ...answerInvite(m), body: sdpAt(40500) }]);
+    expect(rtpOpened).toHaveLength(2);
+    expect(rtpOpened[0]?.close).toHaveBeenCalledTimes(1);
+    expect(rtpOpened[1]?.options).toMatchObject({ remotePort: 40500 });
+    expect(rtpOpened[1]?.close).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds the stream when the 200 OK picks another codec', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), { ...answerInvite(m), body: sdpAt(40000, 0).replace('a=rtpmap:8 PCMA/8000', 'a=rtpmap:0 PCMU/8000') }]);
+    expect(rtpOpened).toHaveLength(2);
+    expect(rtpOpened[1]?.options).toMatchObject({ payloadType: 0 });
+  });
+
+  it('opens the stream at the 200 OK when no provisional carried one', async () => {
+    const r = rig();
+    await place(r, (m) => [reply(m, 180), answerInvite(m)]);
+    expect(rtpOpened).toHaveLength(1);
+    expect(progressOf(r)).toBe('calls.progress.active');
+  });
+
+  it('closes the early stream when the call then fails', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), reply(m, 486)]);
+    expect(rtpOpened).toHaveLength(1);
+    expect(rtpOpened[0]?.close).toHaveBeenCalledTimes(1);
+    expect(noMedia.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the early stream when the user cancels', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183)]);
+    await r.engine.hangup(r.engine.getCallViews()[0]?.call.id as string);
+    expect(rtpOpened[0]?.close).toHaveBeenCalledTimes(1);
+    expect(noMedia.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the early stream when a 200 OK arrives without a usable answer', async () => {
+    const r = rig();
+    await place(r, (m) => [withSdp(m, 183), reply(m, 200)]);
+    expect(rtpOpened[0]?.close).toHaveBeenCalledTimes(1);
   });
 });

@@ -18,6 +18,19 @@ automática.
   registro de cada uma em tempo real.
 - **Atendimento de chamadas** — tocar, atender, rejeitar, colocar em espera, retomar e
   encerrar, com limite configurável de chamadas simultâneas.
+- **Fazer chamadas** — um discador com uma linha por chamada, verificado em uma chamada
+  real com áudio ouvido nos dois sentidos.
+- **Histórico de chamadas e rediscagem** — toda chamada encerrada é listada com o horário,
+  a direção (recebida ou feita), o número ou endereço remoto, a conta que a transportou, o
+  resultado (atendida, perdida, recusada, cancelada ou falhou) e, quando completou, a
+  duração. As entradas são agrupadas por dia, com "Hoje" e "Ontem" escritos no idioma da
+  interface. Um filtro **Perdidas** mostra apenas as chamadas recebidas sem resposta,
+  qualquer entrada pode ser removida isoladamente, e **Limpar histórico** apaga a lista
+  depois de uma confirmação. Clicar em uma entrada a redisca pelo mesmo caminho do
+  discador; o histórico guarda as 500 chamadas mais recentes e sobrevive a uma
+  reinicialização.
+- **User-Agent SIP configurável** — em **Configurações**, para provedores que só aceitam
+  clientes que reconhecem; veja [Solução de problemas](#solução-de-problemas).
 - **Interface bilíngue** — inglês e português do Brasil, alternáveis em tempo de
   execução. Nenhum texto visível ao usuário está escrito direto no código; a CI
   bloqueia quem tentar.
@@ -48,6 +61,47 @@ Kamailio ou OpenSIPS comum funciona sem nenhum módulo de WebSocket.
 Se precisar fixar um caminho específico, preencha o campo opcional de servidor em
 **Avançado** (ou `OPENSIP_ACCOUNT_<N>_SERVER_URI`) com algo como
 `tcp://pbx.exemplo.com:5060`.
+
+## Solução de problemas
+
+### As chamadas somem: sem toque, sem erro, sem nada
+
+Se o registro funciona e as chamadas recebidas chegam, mas uma chamada de saída nunca
+avança e o servidor não dá resposta alguma — nem uma recusa, nem sequer um desafio de
+autenticação `407` — o seu provedor pode estar filtrando pelo cabeçalho SIP `User-Agent`.
+
+Esta é uma restrição do mundo real, não uma peculiaridade de um servidor. Operadoras e
+controladores de borda de sessão costumam aceitar apenas clientes que reconhecem, como
+medida antifraude, e alguns **descartam em silêncio** o INVITE de qualquer outro cliente
+em vez de recusá-lo. Um softphone que não pode ser instruído sobre como se identificar fica
+inutilizável atrás de um deles.
+
+Foi descoberto assim: um servidor OpenSIPS 3.3.10 nunca desafiou um INVITE que levava o
+`User-Agent` padrão do Open SIP Phone (`OpenSIPPhone/0.1.0`). Um segundo softphone, já
+reconhecido, fez a mesma chamada a partir da mesma máquina, e o servidor o respondeu com
+`407 Proxy Authentication Required`; a chamada então tocou e completou. Todo o resto das
+duas requisições era equivalente, então o cabeçalho era a diferença.
+
+**O que fazer.**
+
+- A correção certa está no lado do provedor: peça que ele libere o Open SIP Phone, ou que
+  informe quais valores de `User-Agent` aceita.
+- Enquanto isso se resolve, preencha **Configurações → User-Agent SIP**. O valor é salvo, e
+  a próxima mensagem enviada o leva. Novas chamadas o usam de imediato; um registro o usa na
+  próxima renovação, então desligue e ligue a conta para aplicar na hora. Deixe o campo
+  vazio para voltar ao padrão. A variável de ambiente `OPENSIP_USER_AGENT` fornece o valor
+  inicial antes de você escolher um.
+- Trate isso como um paliativo, não como o jeito normal de usar o app. Use um valor que o
+  seu provedor tenha indicado, não um palpite sobre o que outro produto envia.
+
+### Um número discado precisa do prefixo completo
+
+No mesmo servidor, `55500000396` foi respondido com `404 UNALLOCATED_NUMBER`, enquanto
+`055500000396` completou. Isso é o plano de discagem do provedor, não o app: o número deve
+ser discado exatamente como o plano de discagem espera, incluindo qualquer prefixo de
+tronco ou internacional. É o tipo de coisa que faz alguém perder uma tarde, então confira
+isso primeiro. Um `+` no início (E.164) também foi recusado por esse servidor, com
+`484 Address Incomplete`.
 
 ## Instalação
 
@@ -132,21 +186,26 @@ do núcleo — e é por isso que o protocolo inteiro pode ser testado sem nenhum
 | Descoberta automática de transporte (SRV + sonda) | funcionando |
 | Registro sobre TCP, TLS, UDP, WS, WSS | funcionando |
 | Sinalização de chamada recebida: tocar, atender, rejeitar, encerrar | funcionando |
-| Fazer chamadas: discador, uma linha por chamada | implementado, não confirmado contra um servidor real |
+| Fazer chamadas: discador, uma linha por chamada | funcionando — uma chamada de saída completou em uma conta real |
+| Histórico de chamadas e rediscagem | funcionando, testado por unidade; ainda não exercitado de ponta a ponta em uma chamada real |
 | Liga/desliga por conta | funcionando |
 | Log de diagnóstico com ocultação de credenciais | funcionando |
 | Primeiros passos: permissões de microfone e notificações, primeira conta | funcionando |
-| **Áudio bidirecional (RTP/G.711)** | **implementado, não verificado — nenhuma chamada real ouvida ainda** |
+| User-Agent SIP configurável (Configurações) | funcionando |
+| **Áudio bidirecional (RTP/G.711)** | **verificado em uma chamada de saída real, ouvido nos dois sentidos** |
 
-O caminho de áudio está construído e testado de forma isolada: `src/core/rtp` (G.711
-µ-law e A-law, pacotes RFC 3550, jitter buffer) e `src/main/media` (a sessão RTP e a
-janela de áudio oculta) têm testes unitários, e um teste de loopback UDP levou áudio nos
-dois sentidos sem perda. Mas nenhuma chamada real foi ouvida; por isso ele não está nem
-"pronto" nem "ausente": continua não verificado até que uma pessoa seja ouvida em uma
-chamada real. As chamadas de saída tinham um defeito à parte (um socket UDP conectado
-fazia o kernel descartar as respostas seguintes do servidor); ele está corrigido e coberto
-por testes unitários, mas ainda não confirmado contra um servidor real. Ambos estão no
-[plano de evolução](ROADMAP.md#português).
+O MVP — fazer e receber chamadas com várias contas — está funcionalmente completo, e o
+último item não verificado era o áudio: o dono fez uma chamada de saída real que completou
+com áudio nos dois sentidos. O caminho
+de áudio também é testado de forma isolada: `src/core/rtp` (G.711 µ-law e A-law, pacotes
+RFC 3550, jitter buffer) e `src/main/media` (a sessão RTP e a janela de áudio oculta) têm
+testes unitários, e um teste de loopback UDP levou áudio nos dois sentidos sem perda.
+
+O que essa única chamada **não** prova, e o que não foi confirmado separadamente: atender
+uma chamada recebida e ouvir áudio nos dois sentidos, e duas contas em uso ao mesmo tempo,
+com uma chamada em cada. Nenhuma release foi publicada ainda. O [plano de evolução](ROADMAP.md#português) lista
+cada um desses itens como cumprido ou não. A chamada só completou quando o `User-Agent` SIP
+era um que o provedor reconhece; veja [Solução de problemas](#solução-de-problemas).
 
 O que vem depois, em ordem, está no [plano de evolução](ROADMAP.md#português).
 

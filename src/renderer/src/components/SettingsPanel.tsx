@@ -57,18 +57,31 @@ export interface RingtonePref {
   readonly set: (next: boolean) => void;
 }
 
-export function SettingsPanel({ update, ringtone, userAgent }: {
+function SoundSwitches({ ringtone, ringback }: { readonly ringtone: RingtonePref; readonly ringback: RingtonePref }): JSX.Element {
+  const { t } = useTranslation();
+  return (
+    <>
+      <Switch id="ringtone" label={t('settings.ringtone')} hint={t('settings.ringtone.hint')} checked={ringtone.enabled} onChange={ringtone.set} />
+      <Switch id="ringback" label={t('settings.ringback')} hint={t('settings.ringback.hint')} checked={ringback.enabled} onChange={ringback.set} />
+    </>
+  );
+}
+
+interface SettingsProps {
   readonly update: UpdateStatus;
   readonly ringtone: RingtonePref;
+  readonly ringback: RingtonePref;
   readonly userAgent: UserAgentPref;
-}): JSX.Element {
+}
+
+export function SettingsPanel({ update, ringtone, ringback, userAgent }: SettingsProps): JSX.Element {
   const { t } = useTranslation();
   const permissions = usePermissions();
   return (
     <div className="panel form">
       <LanguageSelect />
       <ThemeSelect />
-      <Switch id="ringtone" label={t('settings.ringtone')} hint={t('settings.ringtone.hint')} checked={ringtone.enabled} onChange={ringtone.set} />
+      <SoundSwitches ringtone={ringtone} ringback={ringback} />
       <UserAgentField pref={userAgent} />
       <PermissionsSection model={permissions} />
       <p className="muted" role="status">

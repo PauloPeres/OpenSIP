@@ -1,7 +1,10 @@
-/** A synthesised North American ring (440 + 480 Hz, two seconds on, four off). No audio file is shipped. */
-const FREQUENCIES: readonly number[] = [440, 480];
-const ON_SECONDS = 2;
-const CYCLE_MS = 6000;
+/** A repeating synthesised tone: these frequencies together for `onSeconds`, then silence up to `cycleMs`. No audio file is shipped. */
+export interface TonePattern {
+  readonly frequencies: readonly number[];
+  readonly onSeconds: number;
+  readonly cycleMs: number;
+}
+
 const PEAK = 0.12;
 const RAMP = 0.05;
 const RELEASE = 0.03;
@@ -40,15 +43,15 @@ export function unlockAudio(): void {
   if (current !== null) resume(current.ctx);
 }
 
-function burst({ ctx, master }: Engine): void {
+function burst({ ctx, master }: Engine, pattern: TonePattern): void {
   const start = ctx.currentTime + 0.02;
-  const end = start + ON_SECONDS;
+  const end = start + pattern.onSeconds;
   master.gain.cancelScheduledValues(start);
   master.gain.setValueAtTime(0, start);
   master.gain.linearRampToValueAtTime(PEAK, start + RAMP);
   master.gain.setValueAtTime(PEAK, end - RAMP);
   master.gain.linearRampToValueAtTime(0, end);
-  for (const hz of FREQUENCIES) {
+  for (const hz of pattern.frequencies) {
     const osc = ctx.createOscillator();
     osc.frequency.value = hz;
     osc.connect(master);
@@ -59,17 +62,18 @@ function burst({ ctx, master }: Engine): void {
   }
 }
 
-export function startRing(): void {
-  if (timer !== null) return;
+/** Only one tone sounds at a time: starting another replaces the one playing. */
+export function startTone(pattern: TonePattern): void {
+  stopTone();
   const current = getEngine();
   if (current === null) return;
   resume(current.ctx);
-  burst(current);
-  timer = window.setInterval(() => burst(current), CYCLE_MS);
+  burst(current, pattern);
+  timer = window.setInterval(() => burst(current, pattern), pattern.cycleMs);
 }
 
 /** Silences at once with a short release, so there is no click. */
-export function stopRing(): void {
+export function stopTone(): void {
   if (timer === null) return;
   window.clearInterval(timer);
   timer = null;

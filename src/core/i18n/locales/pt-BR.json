@@ -190,6 +190,8 @@
   "settings.language.ptBR": "Português (Brasil)",
   "settings.ringtone": "Som de chamada",
   "settings.ringtone.hint": "Tocar um som quando entrar uma chamada.",
+  "settings.ringback": "Som de chamando",
+  "settings.ringback.hint": "Tocar o som de chamando enquanto uma chamada que você fez toca. O áudio enviado pela operadora sempre é reproduzido.",
   "settings.theme": "Aparência",
   "settings.theme.dark": "Escuro",
   "settings.theme.hint": "Acompanhar o sistema, ou escolher uma.",

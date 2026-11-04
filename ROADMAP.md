@@ -16,17 +16,23 @@ date we cannot defend is worse than none.
 ordering, message framing, digest responses, jitter-buffer policy, codec maths: all of it
 is plain code with no Electron, no DOM and no sockets. `src/main` only owns the things
 that cannot be pure (sockets, DNS, the audio device) and feeds events into the core. That
-is why the protocol can be tested exhaustively without a PBX: 914 unit tests and 21
-Gherkin scenarios, at 100% statement coverage of the core.
+is why the protocol can be tested exhaustively without a PBX: more than 1,400 unit tests and
+21 Gherkin scenarios, at 100% statement coverage of the core.
 
 Every phase below is planned the same way: put the decisions in `src/core` first, write
 the failing test, then add the thin adapter. Anything that cannot be tested that way is
 called out as a risk.
 
 One caution about that number: coverage proves the code is exercised, not that the server
-agrees with it. The blocker below is exactly the kind of thing a green suite cannot show.
+agrees with it. The outbound-call problem below is exactly the kind of thing a green suite
+cannot show: every test passed while a real server silently ignored the calls.
 
-### MVP — make and receive calls with several accounts at once (in progress)
+### MVP — make and receive calls with several accounts at once (functionally complete; exit criteria not all met)
+
+The owner placed a real outbound call that connected with **two-way audio**, and
+confirmed it. That was the last unverified item, so the MVP as defined here — making and
+receiving calls with multiple accounts — works. Its exit criteria, listed below, are not
+all met, and this document does not round them up.
 
 | Area | State |
 | --- | --- |
@@ -35,101 +41,127 @@ agrees with it. The blocker below is exactly the kind of thing a green suite can
 | NAT handling: `rport`, with the learned public address used in `Contact` | **Working**, verified live |
 | Per-account on/off switching | **Working**, verified live |
 | Diagnostics log that redacts credentials | **Working** |
-| Two-way RTP audio: G.711 µ-law and A-law, jitter buffer, DTMF (RFC 4733), mute, hold and resume | **Implemented, not verified end to end.** Unit-tested; a UDP loopback test carried audio both ways with zero loss; **no real call has been heard yet** |
-| Outbound call to an internal extension | The extension rings, but the caller saw only `100 Trying` (same cause as below); awaiting live confirmation |
-| Outbound call to an external number | **Fix shipped, awaiting live confirmation — see below** |
+| Two-way RTP audio: G.711 µ-law and A-law, jitter buffer, DTMF (RFC 4733), mute, hold and resume | **Verified on a real outbound call, heard in both directions.** Also unit-tested, and a UDP loopback test carried audio both ways with zero loss. Not separately confirmed: audio on an *incoming* call, DTMF, hold and resume on a real call |
+| Outbound call | **Working**: a real call connected. It needs a `User-Agent` the provider recognises and a number with its full prefix — see below |
+| Configurable SIP `User-Agent` | **Working**: **Settings → SIP User-Agent**, persisted, applied to the next message sent |
+| Call history and redial | **Delivered** — see Phase 1 |
 | Published release | **None yet** |
 | macOS signing | Ad-hoc signed, not Developer ID: the keychain prompts on each build and Gatekeeper warns on download |
 | macOS 26 icon | Restyled by the system, because the app does not ship the new Icon Composer format |
 
-#### The outbound-call blocker: cause found and fixed, not yet confirmed live
+#### The outbound-call blocker: resolved, and the cause was the User-Agent
 
-Outbound calls never completed. The INVITE was sent, the server answered `100 Trying`,
-and then nothing at all arrived: no `180`, no `183`, no error, no final response. This
-affected an external number and an internal extension alike.
+Outbound calls never completed. The INVITE went out and the call never got further: no
+ringing, no error, no failure. This affected an external number and an internal extension
+alike, while registration and incoming calls worked.
 
-**The cause was in the client, not the server.** The UDP socket was created with
-`socket.connect(port, host)`. A connected datagram socket makes the kernel drop every
-packet whose source does not exactly match the connected peer. SIP over UDP breaks that
-assumption routinely: a proxy commonly sends later responses from a different port,
-listener or interface than the one that received the request, and RFC 3261 matches a
-response to its transaction by the Via branch precisely because the source address can
-legitimately differ. The proxy's own `100 Trying` arrived; the relayed `180` and `200`
-were discarded by the operating system before our code saw them. Registration and
-inbound calls were unaffected, because those arrive at the bound port regardless.
+**The cause was the SIP `User-Agent`, and the server was discarding the request.** The
+owner's OpenSIPS 3.3.10 **silently discards INVITEs from a User-Agent it does not
+recognise**: no `407`, no error, nothing at all. With `OpenSIPPhone/0.1.0` the server never
+challenged. With the `User-Agent` of a softphone it recognises, it answered `407 Proxy
+Authentication Required`, and the call rang and connected. This was established by capturing
+both clients placing the same call from the same machine; everything else in the request
+was byte-for-byte equivalent.
 
-The decisive evidence: across every captured trace, no outbound INVITE ever received any
-response other than `100`, whether for an external number or for an internal extension
-that demonstrably rings. A dialplan fault would not behave identically for both. The
-roadmap previously said the evidence pointed at the server's dialplan or outbound trunk;
-that was wrong.
+This is a constraint users will meet, not a quirk of one server. Carriers and session
+border controllers commonly filter on `User-Agent` as an anti-fraud measure, and a softphone
+that cannot be told what to identify as is unusable behind one. So the value is now a
+setting, **Settings → SIP User-Agent**, persisted and used for the next message sent
+(a registration picks it up when it next renews). The README's
+[Troubleshooting](README.md#troubleshooting) section is where a user is told about it.
 
-The fix is in `src/main/sip/connection.ts`: the socket is bound and used with an explicit
-destination, and accepts datagrams from any source.
+What this does and does not mean:
 
-What is and is not established:
+- **The right fix is on the provider's side**: it should allow the client. Setting the
+  header is the workaround while that is arranged. It is not a recommendation to present the
+  app as some other product as the normal way to use it, and the app does not offer a list of
+  other products to choose from.
+- **A dialled number needs its full prefix.** On the same server `55500000396` was answered
+  `404 UNALLOCATED_NUMBER` and `055500000396` connected. That is a dialplan matter, not an
+  app one, but it is exactly the kind of thing that wastes someone's afternoon. A leading
+  `+` (E.164) was refused by that server with `484 Address Incomplete`.
+- **The earlier diagnosis was wrong.** This roadmap previously blamed a connected UDP
+  socket, which makes the kernel drop datagrams whose source differs from the connected
+  peer. The socket is now bound and used with an explicit destination
+  (`src/main/sip/connection.ts`), covered by unit tests, and that is the correct behaviour
+  for SIP over UDP under RFC 3261. But it was **not** what stopped the calls, and we have no
+  evidence it changed any outcome on the real server. Before that, the roadmap blamed the
+  server's dialplan or outbound trunk; that was wrong too. What exposed the real cause was a
+  side-by-side capture of two clients placing the same call.
+- A 90-second call-setup guard cancels a call that is never answered and reports it,
+  instead of spinning forever.
 
-- **Proven by unit tests** against a socket fake that mimics the kernel's filtering of a
-  connected socket: the old behaviour loses the later responses, the new behaviour
-  receives them.
-- **Not yet verified against the real server.** That needs a call placed by the owner. Until
-  then we cannot claim the MVP works, and it remains possible that the server has a
-  second, independent problem that the lost responses were hiding.
-- `+5555500000396` is rejected outright with `484 Address Incomplete`, so E.164 with a
-  leading plus is the wrong form for this server. This finding stands.
-- A 90-second call-setup guard cancels the call and reports it, instead of spinning
-  forever.
+#### MVP exit criteria
 
-The MVP is done when, and only when:
+The MVP is done when, and only when, all four hold. Today:
 
-1. A call to an external number is answered and **a person on the far end is heard, and
-   hears the user**, in a real call on at least one account.
-2. An incoming call is answered and carries audio both ways.
-3. Two accounts are registered and in use at once, with a call on each.
-4. A first release is published.
+| # | Criterion | State |
+| --- | --- | --- |
+| 1 | A call to an external number is answered and **a person on the far end is heard, and hears the user**, in a real call on at least one account | **Met.** A real outbound call connected, with audio heard in both directions |
+| 2 | An incoming call is answered and carries audio both ways | **Not confirmed.** Incoming call signalling works (ring, answer, reject, hang up); answering a real incoming call and hearing audio both ways has not been separately confirmed |
+| 3 | Two accounts are registered and in use at once, with a call on each | **Not confirmed.** Several accounts register at once, verified live; two simultaneous calls, one on each, have not been separately confirmed |
+| 4 | A first release is published | **Not met.** No release has been published |
 
-Items 1 and 2 are what turn "implemented" into "verified" for the audio path. Item 1 is
-also the live confirmation of the socket fix above; if that call still fails, the next
-step is a fresh trace, not an assumption about the server.
+So criterion 1 is met, criteria 2 and 3 are unconfirmed rather than failing, and criterion 4
+is outstanding. The MVP is therefore functionally complete but not yet closed.
 
-Until the MVP is done, the four phases below are **ordered but not started.** They depend
-on a working call path: history records calls, contacts identify and place them,
-recording captures their audio, and MCP drives all of it.
+The phases below are ordered, and Phase 1 is delivered. Phase 2 is the current one. Phases 3
+and 4 are **ordered but not started**. Recording (Phase 3) depends on audio that is now
+verified on an outbound call; it would also want incoming-call audio confirmed, since a
+recording of one direction is not a feature.
 
-### Phase 1 — Call history and redial
+### Phase 1 — Call history and redial (delivered)
 
-**What the user gets.** A list of every call, incoming, outgoing and missed, per account,
-with the time it started, how long it lasted, the number or contact, which account carried
-it, and how it ended (answered, rejected, missed, cancelled, failed, timed out). Selecting
-an entry shows its details; one action redials it from the same account.
+**What the user gets.** A list of every finished call, with the time, the direction
+(incoming or outgoing), the remote number or address, the account that carried it, the
+outcome and, when the call connected, how long it lasted. Calls are grouped by day, with
+"Today" and "Yesterday" produced by `Intl` in the interface language and older days written
+as a date. A **Missed** filter (with a count) shows only unanswered incoming calls. Any
+entry can be removed on its own, **Clear history** empties the list after a confirmation,
+and clicking an entry redials it through the same dial path the dialer uses. The history
+survives a restart.
 
-**What it touches.**
+**How it is built.**
 
-- `src/core/sip`: a pure history model on top of the existing call state machine in
-  `call.ts`. A call reaching its end state yields one history record, including the end
-  reason the engine already tracks (for example the 90-second setup guard). Retention rules
-  (keep N entries, or N days) are pure functions here too.
-- `src/main`: persistence next to `account-storage.ts`. History is a new store with its own
-  file, not a field on the accounts.
-- `src/shared/api.ts`: new IPC channels to list, delete and clear history, and a redial
-  call that reuses `dial`.
-- `src/renderer`: a history view and a redial control. New strings go in both locale
-  files.
+- `src/core/history/`: the pure model. `CallJournal` follows a call from its first moment to
+  its last and yields exactly one `CallRecord` when it ends; `classifyOutcome` decides the
+  outcome; `store.ts` appends, removes and clears, derives the duration from the timestamps
+  (it is not a stored field, so it cannot disagree with them), and filters; `redial.ts`
+  decides whether an identity can be dialled and from which account; `parse.ts` validates what
+  is read back from disk.
+- Outcomes are `answered`, `missed`, `rejected` (shown as "Declined"), `cancelled` and
+  `failed`. A call that reached the active state counts as answered however it ended.
+- Retention is a cap: the most recent **500** entries are kept, and the oldest fall off.
+- `src/main`: the engine feeds the journal, and persistence is in the same file as the
+  accounts, handled by `account-storage.ts`.
+- `src/renderer`: a **History** view (`HistoryPanel.tsx`, `HistoryRow.tsx`) and the redial
+  logic.
 
-**Main risk.** Ending a call is messy: remote hang-up, CANCEL racing a final response,
-transport loss and the setup guard are all different paths to "ended", and a record that
-is written twice or never is a bug users see immediately. A second risk is privacy: call
-history is personal data stored in plain form on disk, unlike credentials, which are
-encrypted with `safeStorage`. Whether history should be encrypted too is a decision to
-make before shipping it.
+**Where it differs from the plan above.** The plan said the model would sit in
+`src/core/sip`, that history would be a separate file, that selecting an entry would open a
+detail view, that retention might be by days, and that "timed out" would be an outcome.
+What shipped: the model is in its own `src/core/history/` module; history shares the
+accounts file; selecting a row redials it and there is no detail view; retention is the
+500-entry cap only, with no age-based rule; and a setup timeout is recorded as `failed` with
+its reason.
 
-**Done looks like.** Place a call, hang up, and see exactly one entry with the right
-direction, account, number, start time, duration and end reason. Miss an incoming call
-and see it marked as missed. Restart the app and the history is still there. Redial
-places a new call from the same account. Delete one entry and clear all both work. All
-covered by Gherkin scenarios.
+**Redial.** The call goes out from the account the original call used when that account is
+still registered; if it is not, from the first registered account. An identity that cannot be
+dialled — a bare display name, an anonymous caller — has its redial disabled with a note,
+rather than guessing a number. Redial is refused while an outbound call on that account is
+still being set up.
 
-### Phase 2 — Computer contacts
+**At rest.** History is stored unencrypted, deliberately, and the reason is written down in
+`account-storage.ts`: it is bounded by the cap and by **Clear history**, and encrypting it
+with the OS keychain would add prompts and failure modes without protecting it from a process
+already running as the user. Credentials remain encrypted with `safeStorage`.
+
+**Not yet exercised end to end.** The history is unit-tested, but no confirmation against
+real calls of every outcome is recorded here. Ending a call is messy — remote hang-up,
+CANCEL racing a final response, transport loss and the setup guard are all different paths to
+"ended" — and a record written twice or never is a bug users see immediately.
+
+### Phase 2 — Computer contacts (current)
 
 **What the user gets.** The contacts already on the computer, readable inside the app. The
 user can add and remove contacts, call a contact with one action, and see the contact's
@@ -266,10 +298,11 @@ refused. The kill switch works mid-call. Covered by Gherkin scenarios.
 ### Order and dependencies
 
 ```
-MVP: working call path (blocker resolved, audio heard)
+MVP: working call path (blocker resolved, outbound audio heard; release not yet published)
  |
- +--> 1. History and redial ------+
- |                                +--> 2. Contacts (names in history, call from contact)
+ +--> 1. History and redial  [delivered] --+
+ |                                         +--> 2. Contacts  [current]
+ |                                              (names in history, call from contact)
  |
  +--> 3. Recording  (needs verified audio; needs the consent decision)
  |
@@ -302,11 +335,11 @@ plan.
 
 | Decision | Why it is open | What it blocks |
 | --- | --- | --- |
-| **The outbound-call blocker** | Fix shipped, awaiting live confirmation. The cause was a connected UDP socket that made the kernel drop responses arriving from a different source than the server address we sent to; proven by unit tests, not yet by a real call. `+` E.164 is rejected with `484`. | The MVP, and therefore everything after it, until a real outbound call completes. |
+| **MVP exit criteria 2–4** | A real outbound call connected, but answering a real incoming call with audio both ways, two accounts in simultaneous use, and a published first release are not yet confirmed or done. | Calling the MVP closed. |
 | **Apple Developer ID certificate** | The macOS build is ad-hoc signed: the keychain asks for permission on each build and Gatekeeper warns on download. Signing and notarising needs a paid Apple Developer account. | A credible macOS release; also reliable TCC permissions for Contacts and the microphone. |
 | **macOS 26 icon format** | The app does not ship the new Icon Composer format, so macOS 26 restyles the icon. | Cosmetic only; can wait. |
 | **Recording consent model** | Audible notice, per-call consent, visible indicator, or a combination; and what "record all" means under it. | Phase 3. |
-| **History and recordings at rest** | Whether history and recordings are encrypted like credentials. | Phases 1 and 3. |
+| **Recordings at rest** | Whether recordings are encrypted like credentials. History was decided: stored unencrypted, capped at 500 entries, clearable. | Phase 3. |
 | **Linux contacts source** | There is no single address book on Linux. | Phase 2 on Linux. |
 
 ---
@@ -326,7 +359,7 @@ transporte, enquadramento de mensagens, resposta digest, política do jitter buf
 matemática de codecs: tudo é código simples, sem Electron, sem DOM e sem sockets. O
 `src/main` cuida só do que não pode ser puro (sockets, DNS, o dispositivo de áudio) e
 alimenta o núcleo com eventos. É por isso que o protocolo pode ser testado
-exaustivamente sem nenhum PBX: 914 testes unitários e 21 cenários Gherkin, com 100% de
+exaustivamente sem nenhum PBX: mais de 1.400 testes unitários e 21 cenários Gherkin, com 100% de
 cobertura de comandos do núcleo.
 
 Todas as fases abaixo são planejadas do mesmo jeito: primeiro as decisões em `src/core`,
@@ -334,10 +367,16 @@ depois o teste que falha, depois o adaptador fino. O que não puder ser testado 
 apontado como risco.
 
 Uma ressalva sobre esse número: cobertura prova que o código é executado, não que o
-servidor concorda com ele. O bloqueio abaixo é exatamente o tipo de coisa que uma suíte
-verde não mostra.
+servidor concorda com ele. O problema da chamada de saída abaixo é exatamente o tipo de
+coisa que uma suíte verde não mostra: todos os testes passavam enquanto um servidor real
+ignorava as chamadas em silêncio.
 
-### MVP — fazer e receber chamadas com várias contas ao mesmo tempo (em andamento)
+### MVP — fazer e receber chamadas com várias contas ao mesmo tempo (funcionalmente completo; critérios de saída nem todos cumpridos)
+
+O dono fez uma chamada de saída real que completou com **áudio nos dois sentidos** e
+confirmou. Esse era o último item não verificado; portanto o MVP como definido aqui —
+fazer e receber chamadas com várias contas — funciona. Os critérios de saída, listados
+abaixo, nem todos foram cumpridos, e este documento não os arredonda para cima.
 
 | Área | Estado |
 | --- | --- |
@@ -346,104 +385,135 @@ verde não mostra.
 | NAT: `rport`, com o endereço público aprendido usado no `Contact` | **Funcionando**, verificado ao vivo |
 | Liga/desliga por conta | **Funcionando**, verificado ao vivo |
 | Log de diagnóstico que oculta credenciais | **Funcionando** |
-| Áudio RTP bidirecional: G.711 µ-law e A-law, jitter buffer, DTMF (RFC 4733), mudo, espera e retomada | **Implementado, não verificado de ponta a ponta.** Testado por unidade; um teste de loopback UDP levou áudio nos dois sentidos sem perda; **nenhuma chamada real foi ouvida ainda** |
-| Chamada de saída para um ramal interno | O ramal toca, mas quem ligou viu apenas `100 Trying` (mesma causa descrita abaixo); aguardando confirmação ao vivo |
-| Chamada de saída para um número externo | **Correção entregue, aguardando confirmação ao vivo — veja abaixo** |
+| Áudio RTP bidirecional: G.711 µ-law e A-law, jitter buffer, DTMF (RFC 4733), mudo, espera e retomada | **Verificado em uma chamada de saída real, ouvido nos dois sentidos.** Também testado por unidade, e um teste de loopback UDP levou áudio nos dois sentidos sem perda. Não confirmados separadamente: o áudio em uma chamada *recebida*, DTMF, espera e retomada em uma chamada real |
+| Chamada de saída | **Funcionando**: uma chamada real completou. Exige um `User-Agent` que o provedor reconheça e um número com o prefixo completo — veja abaixo |
+| `User-Agent` SIP configurável | **Funcionando**: **Configurações → User-Agent SIP**, persistido e aplicado à próxima mensagem enviada |
+| Histórico de chamadas e rediscagem | **Entregue** — veja a Fase 1 |
 | Release publicada | **Nenhuma ainda** |
 | Assinatura no macOS | Assinada ad-hoc, não com Developer ID: o chaveiro pergunta a cada build e o Gatekeeper avisa no download |
 | Ícone no macOS 26 | Reestilizado pelo sistema, porque o app não traz o novo formato do Icon Composer |
 
-#### O bloqueio da chamada de saída: causa encontrada e corrigida, ainda não confirmada ao vivo
+#### O bloqueio da chamada de saída: resolvido, e a causa era o User-Agent
 
-As chamadas de saída nunca se completavam. O INVITE era enviado, o servidor respondia
-`100 Trying` e depois não chegava absolutamente nada: nem `180`, nem `183`, nem erro, nem
-resposta final. Isso valia tanto para um número externo quanto para um ramal interno.
+As chamadas de saída nunca se completavam. O INVITE saía e a chamada não avançava: nem
+toque, nem erro, nem falha. Isso valia tanto para um número externo quanto para um ramal
+interno, enquanto o registro e as chamadas recebidas funcionavam.
 
-**A causa estava no cliente, não no servidor.** O socket UDP era criado com
-`socket.connect(port, host)`. Um socket de datagramas conectado faz o kernel descartar
-todo pacote cuja origem não seja exatamente o par conectado. O SIP sobre UDP quebra essa
-suposição com frequência: um proxy costuma enviar as respostas seguintes de outra porta,
-outro listener ou outra interface, diferentes daqueles que receberam a requisição, e a
-RFC 3261 associa a resposta à transação pelo branch do Via justamente porque o endereço de
-origem pode legitimamente mudar. O `100 Trying` do próprio proxy chegava; os `180` e `200`
-retransmitidos eram descartados pelo sistema operacional antes de o nosso código vê-los. O
-registro e as chamadas recebidas não eram afetados, porque chegam à porta vinculada de
-qualquer jeito.
+**A causa era o `User-Agent` SIP, e o servidor descartava a requisição.** O OpenSIPS 3.3.10
+do dono **descarta em silêncio os INVITEs de um User-Agent que não reconhece**: sem `407`,
+sem erro, absolutamente nada. Com `OpenSIPPhone/0.1.0` o servidor nunca desafiou. Com o
+`User-Agent` de um softphone que ele reconhece, respondeu `407 Proxy Authentication
+Required`, e a chamada tocou e completou. Isso foi estabelecido capturando os dois clientes
+fazendo a mesma chamada a partir da mesma máquina; todo o resto da requisição era
+equivalente byte a byte.
 
-A evidência decisiva: em todos os traces capturados, nenhum INVITE de saída recebeu
-qualquer resposta além de `100`, fosse para um número externo ou para um ramal interno
-que comprovadamente toca. Uma falha de plano de discagem não se comportaria de forma
-idêntica nos dois casos. O plano de evolução dizia antes que a evidência apontava para o
-plano de discagem ou o tronco de saída do servidor; isso estava errado.
+É uma restrição que os usuários vão encontrar, não uma peculiaridade de um servidor.
+Operadoras e controladores de borda de sessão costumam filtrar pelo `User-Agent` como
+medida antifraude, e um softphone que não pode ser instruído sobre como se identificar fica
+inutilizável atrás de um deles. Por isso o valor agora é uma configuração, **Configurações →
+User-Agent SIP**, persistida e usada na próxima mensagem enviada (um registro a adota na
+próxima renovação). É na seção
+[Solução de problemas](README.pt-BR.md#solução-de-problemas) do README que o usuário é
+avisado.
 
-A correção está em `src/main/sip/connection.ts`: o socket é vinculado (`bind`) e usado com
-destino explícito, e aceita datagramas de qualquer origem.
+O que isso significa e o que não significa:
 
-O que está e o que não está estabelecido:
+- **A correção certa está no lado do provedor**: ele deve liberar o cliente. Definir o
+  cabeçalho é o paliativo enquanto isso é providenciado. Não é uma recomendação de
+  apresentar o app como outro produto como jeito normal de usá-lo, e o app não oferece uma
+  lista de outros produtos para escolher.
+- **Um número discado precisa do prefixo completo.** No mesmo servidor, `55500000396` foi
+  respondido com `404 UNALLOCATED_NUMBER` e `055500000396` completou. É uma questão de plano
+  de discagem, não do app, mas é exatamente o tipo de coisa que faz alguém perder uma tarde.
+  Um `+` no início (E.164) foi recusado por esse servidor com `484 Address Incomplete`.
+- **O diagnóstico anterior estava errado.** Este plano culpava antes um socket UDP
+  conectado, que faz o kernel descartar datagramas cuja origem difere do par conectado. O
+  socket agora é vinculado (`bind`) e usado com destino explícito
+  (`src/main/sip/connection.ts`), coberto por testes unitários, e esse é o comportamento
+  correto para SIP sobre UDP segundo a RFC 3261. Mas **não** foi isso que impedia as
+  chamadas, e não temos evidência de que tenha mudado algum resultado no servidor real.
+  Antes disso, o plano culpava o plano de discagem ou o tronco de saída do servidor; isso
+  também estava errado. O que expôs a causa real foi uma captura lado a lado de dois
+  clientes fazendo a mesma chamada.
+- Uma proteção de 90 segundos na montagem da chamada cancela uma chamada que nunca é
+  atendida e avisa, em vez de ficar girando para sempre.
 
-- **Provado por testes unitários** contra um socket falso que imita a filtragem do kernel
-  em um socket conectado: o comportamento antigo perde as respostas seguintes, o novo as
-  recebe.
-- **Ainda não verificado contra o servidor real.** Isso exige uma chamada feita pelo dono.
-  Até lá, não podemos afirmar que o MVP funciona, e continua possível que o servidor tenha
-  um segundo problema, independente, que as respostas perdidas estavam escondendo.
-- `+5555500000396` é rejeitado de imediato com `484 Address Incomplete`; portanto, E.164
-  com o sinal de mais é a forma errada para este servidor. Esta conclusão se mantém.
-- Uma proteção de 90 segundos na montagem da chamada a cancela e avisa, em vez de ficar
-  girando para sempre.
+#### Critérios de saída do MVP
 
-O MVP está pronto quando, e somente quando:
+O MVP está pronto quando, e somente quando, os quatro valem. Hoje:
 
-1. Uma chamada para um número externo é atendida e **uma pessoa do outro lado é ouvida e
-   ouve o usuário**, em uma chamada real e em pelo menos uma conta.
-2. Uma chamada recebida é atendida e leva áudio nos dois sentidos.
-3. Duas contas estão registradas e em uso ao mesmo tempo, com uma chamada em cada.
-4. Uma primeira release é publicada.
+| # | Critério | Estado |
+| --- | --- | --- |
+| 1 | Uma chamada para um número externo é atendida e **uma pessoa do outro lado é ouvida e ouve o usuário**, em uma chamada real e em pelo menos uma conta | **Cumprido.** Uma chamada de saída real completou, com áudio ouvido nos dois sentidos |
+| 2 | Uma chamada recebida é atendida e leva áudio nos dois sentidos | **Não confirmado.** A sinalização de chamada recebida funciona (tocar, atender, rejeitar, encerrar); atender uma chamada recebida real e ouvir áudio nos dois sentidos não foi confirmado separadamente |
+| 3 | Duas contas estão registradas e em uso ao mesmo tempo, com uma chamada em cada | **Não confirmado.** Várias contas se registram ao mesmo tempo, verificado ao vivo; duas chamadas simultâneas, uma em cada, não foram confirmadas separadamente |
+| 4 | Uma primeira release é publicada | **Não cumprido.** Nenhuma release foi publicada |
 
-Os itens 1 e 2 são o que transforma "implementado" em "verificado" para o caminho de
-áudio. O item 1 é também a confirmação ao vivo da correção do socket acima; se essa
-chamada ainda falhar, o próximo passo é um novo trace, não uma suposição sobre o servidor.
+Assim, o critério 1 está cumprido, os critérios 2 e 3 estão não confirmados em vez de
+falhando, e o critério 4 está pendente. O MVP está, portanto, funcionalmente completo, mas
+ainda não encerrado.
 
-Enquanto o MVP não estiver pronto, as quatro fases abaixo estão **ordenadas, mas não
-iniciadas.** Elas dependem de um caminho de chamada funcionando: o histórico registra
-chamadas, os contatos as identificam e as originam, a gravação captura o áudio delas e o
-MCP controla tudo isso.
+As fases abaixo estão ordenadas, e a Fase 1 está entregue. A Fase 2 é a atual. As Fases 3 e
+4 estão **ordenadas, mas não iniciadas**. A gravação (Fase 3) depende de áudio que agora
+está verificado em uma chamada de saída; ela também pediria o áudio da chamada recebida
+confirmado, já que gravar um só sentido não é funcionalidade.
 
-### Fase 1 — Histórico de chamadas e rediscagem
+### Fase 1 — Histórico de chamadas e rediscagem (entregue)
 
-**O que o usuário recebe.** Uma lista de todas as chamadas, recebidas, feitas e perdidas,
-por conta, com o horário de início, a duração, o número ou contato, a conta que a
-transportou e como terminou (atendida, rejeitada, perdida, cancelada, falhou, expirou).
-Selecionar uma entrada mostra os detalhes; uma ação redisca a partir da mesma conta.
+**O que o usuário recebe.** Uma lista de toda chamada encerrada, com o horário, a direção
+(recebida ou feita), o número ou endereço remoto, a conta que a transportou, o resultado e,
+quando a chamada completou, a duração. As chamadas são agrupadas por dia, com "Hoje" e
+"Ontem" produzidos pelo `Intl` no idioma da interface e os dias mais antigos escritos como
+data. Um filtro **Perdidas** (com contagem) mostra apenas as chamadas recebidas sem
+resposta. Qualquer entrada pode ser removida isoladamente, **Limpar histórico** esvazia a
+lista depois de uma confirmação, e clicar em uma entrada a redisca pelo mesmo caminho de
+discagem do discador. O histórico sobrevive a uma reinicialização.
 
-**O que toca.**
+**Como é construído.**
 
-- `src/core/sip`: um modelo de histórico puro sobre a máquina de estados de chamada que já
-  existe em `call.ts`. Uma chamada que chega ao estado final gera um registro de
-  histórico, incluindo o motivo de término que o motor já acompanha (por exemplo, a
-  proteção de 90 segundos). As regras de retenção (manter N entradas ou N dias) também são
-  funções puras aqui.
-- `src/main`: persistência ao lado de `account-storage.ts`. O histórico é um novo
-  armazenamento, com arquivo próprio, e não um campo das contas.
-- `src/shared/api.ts`: novos canais de IPC para listar, apagar e limpar o histórico, e uma
-  chamada de rediscagem que reaproveita o `dial`.
-- `src/renderer`: uma tela de histórico e um controle de rediscagem. Os textos novos vão
-  nos dois arquivos de idioma.
+- `src/core/history/`: o modelo puro. O `CallJournal` acompanha uma chamada do primeiro ao
+  último momento e produz exatamente um `CallRecord` quando ela termina; o `classifyOutcome`
+  decide o resultado; o `store.ts` acrescenta, remove e limpa, deriva a duração dos
+  horários (ela não é um campo gravado, então não pode discordar deles) e filtra; o
+  `redial.ts` decide se uma identidade pode ser discada e a partir de qual conta; o
+  `parse.ts` valida o que é lido de volta do disco.
+- Os resultados são `answered`, `missed`, `rejected` (exibido como "Recusada"), `cancelled`
+  e `failed`. Uma chamada que chegou ao estado ativo conta como atendida, seja qual for o
+  jeito de terminar.
+- A retenção é um teto: as **500** entradas mais recentes são mantidas, e as mais antigas
+  saem.
+- `src/main`: o motor alimenta o journal, e a persistência fica no mesmo arquivo das contas,
+  tratada pelo `account-storage.ts`.
+- `src/renderer`: uma tela **Histórico** (`HistoryPanel.tsx`, `HistoryRow.tsx`) e a lógica
+  de rediscagem.
 
-**Principal risco.** Encerrar uma chamada é bagunçado: desligamento remoto, CANCEL em
-corrida com uma resposta final, perda de transporte e a proteção de montagem são caminhos
-diferentes até "encerrada", e um registro gravado duas vezes ou nenhuma é um defeito que o
-usuário vê na hora. Um segundo risco é a privacidade: o histórico é dado pessoal gravado
-em disco em texto simples, ao contrário das credenciais, criptografadas com `safeStorage`.
-Se o histórico também deve ser criptografado é uma decisão a tomar antes de entregar.
+**Onde difere do plano acima.** O plano dizia que o modelo ficaria em `src/core/sip`, que o
+histórico seria um arquivo separado, que selecionar uma entrada abriria uma tela de
+detalhes, que a retenção poderia ser por dias e que "expirou" seria um resultado. O que foi
+entregue: o modelo está em seu próprio módulo `src/core/history/`; o histórico divide o
+arquivo das contas; selecionar uma linha a redisca e não há tela de detalhes; a retenção é
+só o teto de 500 entradas, sem regra por idade; e uma expiração na montagem é registrada
+como `failed`, com o seu motivo.
 
-**Pronto é assim.** Faça uma chamada, desligue e veja exatamente uma entrada com a
-direção, a conta, o número, o horário, a duração e o motivo de término corretos. Perca uma
-chamada recebida e veja-a marcada como perdida. Reinicie o app e o histórico continua lá.
-A rediscagem faz uma nova chamada a partir da mesma conta. Apagar uma entrada e limpar
-tudo funcionam. Tudo coberto por cenários Gherkin.
+**Rediscagem.** A chamada sai da conta que a chamada original usou, quando essa conta
+continua registrada; se não, da primeira conta registrada. Uma identidade que não pode ser
+discada — um nome de exibição solto, um chamador anônimo — tem a rediscagem desativada com
+uma nota, em vez de adivinhar um número. A rediscagem é recusada enquanto uma chamada de
+saída dessa conta ainda está sendo montada.
 
-### Fase 2 — Contatos do computador
+**Em repouso.** O histórico é gravado sem criptografia, de propósito, e o motivo está
+escrito em `account-storage.ts`: ele é limitado pelo teto e por **Limpar histórico**, e
+criptografá-lo com o chaveiro do sistema acrescentaria pedidos de permissão e modos de
+falha sem protegê-lo de um processo que já roda como o usuário. As credenciais continuam
+criptografadas com o `safeStorage`.
+
+**Ainda não exercitado de ponta a ponta.** O histórico tem testes unitários, mas não há
+aqui registro de confirmação contra chamadas reais de todos os resultados. Encerrar uma
+chamada é bagunçado — desligamento remoto, CANCEL em corrida com uma resposta final, perda
+de transporte e a proteção de montagem são caminhos diferentes até "encerrada" — e um
+registro gravado duas vezes ou nenhuma é um defeito que o usuário vê na hora.
+
+### Fase 2 — Contatos do computador (atual)
 
 **O que o usuário recebe.** Os contatos que já estão no computador, legíveis dentro do
 app. O usuário pode adicionar e remover contatos, ligar para um contato com uma única
@@ -591,10 +661,11 @@ funciona no meio da chamada. Coberto por cenários Gherkin.
 ### Ordem e dependências
 
 ```
-MVP: caminho de chamada funcionando (bloqueio resolvido, áudio ouvido)
+MVP: caminho de chamada funcionando (bloqueio resolvido, áudio de saída ouvido; release ainda não publicada)
  |
- +--> 1. Histórico e rediscagem --+
- |                                +--> 2. Contatos (nomes no histórico, ligar a partir do contato)
+ +--> 1. Histórico e rediscagem  [entregue] --+
+ |                                            +--> 2. Contatos  [atual]
+ |                                                 (nomes no histórico, ligar a partir do contato)
  |
  +--> 3. Gravação  (exige áudio verificado; exige a decisão de consentimento)
  |
@@ -628,9 +699,9 @@ plano.
 
 | Decisão | Por que está em aberto | O que bloqueia |
 | --- | --- | --- |
-| **O bloqueio da chamada de saída** | Correção entregue, aguardando confirmação ao vivo. A causa era um socket UDP conectado, que fazia o kernel descartar respostas vindas de origem diferente do endereço do servidor para o qual enviamos; provado por testes unitários, ainda não por uma chamada real. E.164 com `+` é rejeitado com `484`. | O MVP e, portanto, tudo o que vem depois, até que uma chamada de saída real se complete. |
+| **Critérios de saída 2 a 4 do MVP** | Uma chamada de saída real completou, mas atender uma chamada recebida real com áudio nos dois sentidos, duas contas em uso simultâneo e uma primeira release publicada ainda não estão confirmados nem feitos. | Dar o MVP por encerrado. |
 | **Certificado Developer ID da Apple** | O build do macOS é assinado ad-hoc: o chaveiro pede permissão a cada build e o Gatekeeper avisa no download. Assinar e notarizar exige uma conta paga de desenvolvedor Apple. | Uma release crível para macOS; também permissões TCC confiáveis para Contatos e microfone. |
 | **Formato do ícone no macOS 26** | O app não traz o novo formato do Icon Composer, então o macOS 26 reestiliza o ícone. | Apenas estético; pode esperar. |
 | **Modelo de consentimento da gravação** | Aviso sonoro, consentimento por chamada, indicador visível ou uma combinação; e o que "gravar todas" significa sob ele. | Fase 3. |
-| **Histórico e gravações em repouso** | Se histórico e gravações são criptografados como as credenciais. | Fases 1 e 3. |
+| **Gravações em repouso** | Se as gravações são criptografadas como as credenciais. O histórico foi decidido: sem criptografia, limitado a 500 entradas, com opção de limpar. | Fase 3. |
 | **Fonte de contatos no Linux** | Não existe uma agenda única no Linux. | Fase 2 no Linux. |

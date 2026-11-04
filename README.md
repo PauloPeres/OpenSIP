@@ -17,6 +17,18 @@ Linux, from a single codebase, with automatic updates.
   registration state of each one live.
 - **Answer incoming calls** — ring, answer, reject, hold, resume and hang up, with a
   configurable limit of concurrent calls.
+- **Place calls** — a dialer with one line per call, verified on a real call with audio
+  heard in both directions.
+- **Call history and redial** — every finished call is listed with its time, direction
+  (incoming or outgoing), the remote number or address, the account that carried it, its
+  outcome (answered, missed, declined, cancelled or failed) and, when it connected, how
+  long it lasted. Entries are grouped by day, with "Today" and "Yesterday" written in the
+  interface language. A **Missed** filter shows only unanswered incoming calls, any entry
+  can be removed on its own, and **Clear history** wipes the list after a confirmation.
+  Clicking an entry redials it through the same path as the dialer; the history keeps the
+  most recent 500 calls and survives a restart.
+- **Configurable SIP User-Agent** — under **Settings**, for providers that only accept
+  clients they recognise; see [Troubleshooting](#troubleshooting).
 - **Bilingual interface** — English and Brazilian Portuguese, selectable at runtime.
   Not a single user-facing string is hardcoded; CI enforces it.
 - **Automatic updates** — built on `electron-updater`, so a release reaches users
@@ -44,6 +56,45 @@ or OpenSIPS endpoint works without any WebSocket module.
 
 If you need to pin one specific path, set the optional server field under **Advanced**
 (or `OPENSIP_ACCOUNT_<N>_SERVER_URI`) to something like `tcp://pbx.example.com:5060`.
+
+## Troubleshooting
+
+### Calls vanish: no ringing, no error, nothing
+
+If registration works and incoming calls arrive, but an outgoing call never progresses and
+the server gives no answer at all — not a rejection, not even a `407` authentication
+challenge — your provider may be filtering on the SIP `User-Agent` header.
+
+This is a real-world constraint, not a quirk of one server. Carriers and session border
+controllers commonly accept only clients they recognise, as an anti-fraud measure, and some
+**silently discard** the INVITE of any other client instead of refusing it. A softphone that
+cannot be told what to identify as is unusable behind one.
+
+It was found this way: an OpenSIPS 3.3.10 server never challenged an INVITE that carried
+Open SIP Phone's default `User-Agent` (`OpenSIPPhone/0.1.0`). A second, already recognised
+softphone placed the same call from the same machine, and the server answered it with
+`407 Proxy Authentication Required`; the call then rang and connected. Everything else in
+the two requests was equivalent, so the header was the difference.
+
+**What to do.**
+
+- The correct fix is on the provider's side: ask them to allow Open SIP Phone, or to tell
+  you which `User-Agent` values they accept.
+- While that is being arranged, set **Settings → SIP User-Agent**. The value is saved, and
+  the next message sent carries it. New calls use it immediately; a registration uses it the
+  next time it renews, so turn the account off and on to apply it at once. Leave the field
+  empty to go back to the default. The `OPENSIP_USER_AGENT` environment variable provides
+  the initial value before you have chosen one.
+- Treat it as a workaround, not as the normal way to use the app. Use a value your provider
+  has told you to use, not a guess at what another product sends.
+
+### A dialled number needs its full prefix
+
+On the same server, `55500000396` was answered `404 UNALLOCATED_NUMBER`, while
+`055500000396` connected. That is the provider's dialplan, not the app: the number must be
+dialled exactly as the dialplan expects, including any trunk or international prefix. It
+is the kind of thing that wastes an afternoon, so check it first. A leading `+` (E.164) was
+also refused by that server, with `484 Address Incomplete`.
 
 ## Install
 
@@ -126,20 +177,26 @@ which is why the whole protocol can be tested exhaustively without a PBX.
 | Automatic transport discovery (SRV + probe) | working |
 | Registration over TCP, TLS, UDP, WS, WSS | working |
 | Incoming call signalling: ring, answer, reject, hang up | working |
-| Placing calls: dialer, one line per call | implemented, unconfirmed against a live server |
+| Placing calls: dialer, one line per call | working — an outbound call connected on a real account |
+| Call history and redial | working, unit-tested; not yet exercised end to end on a real call |
 | Per-account on/off switch | working |
 | Diagnostics log with credential redaction | working |
 | Onboarding: microphone and notification permissions, first account | working |
-| **Two-way audio (RTP/G.711)** | **implemented, unverified — no real call heard yet** |
+| Configurable SIP User-Agent (Settings) | working |
+| **Two-way audio (RTP/G.711)** | **verified on a real outbound call, heard in both directions** |
 
-The audio path is built and tested in isolation: `src/core/rtp` (G.711 µ-law and A-law,
-RFC 3550 packets, a jitter buffer) and `src/main/media` (the RTP session and the hidden
-audio window) are unit-tested, and a UDP loopback test carried audio both ways with zero
-loss. But no real call has been heard, so it is neither "done" nor "missing": it stays
-unverified until a person is heard on a real call. Outbound calls had a separate defect
-(a connected UDP socket made the kernel drop the server's later responses); it is fixed
-and covered by unit tests, but not yet confirmed against a real server. Both are tracked
-in the [roadmap](ROADMAP.md).
+The MVP — making and receiving calls with several accounts — is functionally complete,
+and the last unverified item was the audio: the owner placed a real outbound call that
+connected with two-way audio. The audio path is also tested in
+isolation: `src/core/rtp` (G.711 µ-law and A-law, RFC 3550 packets, a jitter buffer) and
+`src/main/media` (the RTP session and the hidden audio window) are unit-tested, and a UDP
+loopback test carried audio both ways with zero loss.
+
+What that one call does **not** prove, and what has not been confirmed separately:
+answering an incoming call and hearing audio both ways, and two accounts in use at once,
+with a call on each. No release has been published yet. The roadmap lists each of these
+as met or not met. The call only completed once the SIP `User-Agent` was one the provider
+recognised; see [Troubleshooting](#troubleshooting).
 
 What comes after that, in order, is in the [roadmap](ROADMAP.md).
 

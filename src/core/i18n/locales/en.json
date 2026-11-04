@@ -190,6 +190,8 @@
   "settings.language.ptBR": "Portuguese (Brazil)",
   "settings.ringtone": "Ringtone",
   "settings.ringtone.hint": "Play a sound when a call comes in.",
+  "settings.ringback": "Ringing sound",
+  "settings.ringback.hint": "Play a ringing tone while a call you placed is ringing. Sound sent by the phone company is always played.",
   "settings.theme": "Appearance",
   "settings.theme.dark": "Dark",
   "settings.theme.hint": "Follow the system, or pick one.",

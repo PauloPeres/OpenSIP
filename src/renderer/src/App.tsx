@@ -61,7 +61,7 @@ function AccountsView({ state }: { readonly state: AppState }): JSX.Element {
   );
 }
 
-function PhoneView({ state, model, now, setupStarts }: Omit<ViewProps, 'view' | 'ringtone' | 'onRedialed'>): JSX.Element {
+function PhoneView({ state, model, now, setupStarts }: Omit<ViewProps, 'view' | 'ringtone' | 'ringback' | 'onRedialed'>): JSX.Element {
   const { snapshot, actions } = state;
   return (
     <div className="phone">
@@ -82,14 +82,15 @@ interface ViewProps {
   readonly now: number;
   readonly setupStarts: ReadonlyMap<string, number>;
   readonly ringtone: RingtonePref;
+  readonly ringback: RingtonePref;
   readonly onRedialed: (callId: string) => void;
 }
 
-function ViewContent({ view, state, model, now, setupStarts, ringtone, onRedialed }: ViewProps): JSX.Element {
+function ViewContent({ view, state, model, now, setupStarts, ringtone, ringback, onRedialed }: ViewProps): JSX.Element {
   if (view === 'history') return <HistoryPanel snapshot={state.snapshot} actions={state.actions} onDialed={onRedialed} />;
   if (view === 'accounts') return <AccountsView state={state} />;
   if (view === 'logs') return <LogsPanel snapshot={state.snapshot} actions={state.actions} />;
-  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} userAgent={{ value: state.snapshot.userAgent, save: state.actions.setUserAgent }} />;
+  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} ringback={ringback} userAgent={{ value: state.snapshot.userAgent, save: state.actions.setUserAgent }} />;
   return <PhoneView state={state} model={model} now={now} setupStarts={setupStarts} />;
 }
 
@@ -99,6 +100,7 @@ interface CallFlow {
   readonly setupStarts: ReadonlyMap<string, number>;
   readonly announcement: string;
   readonly ringtone: RingtonePref;
+  readonly ringback: RingtonePref;
   readonly answer: (callId: string) => void;
   /** A call placed from history: bring its line forward on the phone view. */
   readonly redialed: (callId: string) => void;
@@ -110,7 +112,8 @@ function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
   const setupStarts = useSetupClock(model.lines);
   const announcement = useAnnouncement(model.lines);
   const [enabled, setEnabled] = useStoredFlag('opensip.ringtone', true);
-  useRingtone(model.lines, enabled);
+  const [ringbackOn, setRingbackOn] = useStoredFlag('opensip.ringback', true);
+  useRingtone(model.lines, { ringtone: enabled, ringback: ringbackOn }, state.snapshot.locale);
   useIncomingNotification(model.lines, state.snapshot.accounts);
   const answer = (id: string): void => {
     void state.actions.answer(id);
@@ -121,7 +124,7 @@ function useCallFlow(state: AppState, showCalls: () => void): CallFlow {
     model.focus(id);
     showCalls();
   };
-  return { model, now, setupStarts, announcement, ringtone: { enabled, set: setEnabled }, answer, redialed };
+  return { model, now, setupStarts, announcement, ringtone: { enabled, set: setEnabled }, ringback: { enabled: ringbackOn, set: setRingbackOn }, answer, redialed };
 }
 
 interface AlertsProps {
@@ -156,7 +159,7 @@ function Workspace({ state }: { readonly state: AppState }): JSX.Element {
         {state.failed ? <p className="notice" role="alert">{t('error.unexpected')}</p> : null}
         <main className="view">
           <ErrorBoundary key={view}>
-            <ViewContent view={view} state={state} model={flow.model} now={flow.now} setupStarts={flow.setupStarts} ringtone={flow.ringtone} onRedialed={flow.redialed} />
+            <ViewContent view={view} state={state} model={flow.model} now={flow.now} setupStarts={flow.setupStarts} ringtone={flow.ringtone} ringback={flow.ringback} onRedialed={flow.redialed} />
           </ErrorBoundary>
         </main>
       </div>

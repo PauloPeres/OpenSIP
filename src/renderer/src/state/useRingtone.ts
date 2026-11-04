@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
-import { isIncomingRing } from './useLines';
 import type { Line } from './useLines';
-import { startRing, stopRing, unlockAudio } from '../ring/ringer';
+import { startTone, stopTone, unlockAudio } from '../ring/ringer';
+import { chooseTone } from '../ring/tones';
+import type { TonePrefs } from '../ring/tones';
 
 /** Resumes a suspended AudioContext on the first gesture, then stops listening. */
 function useAudioUnlock(): void {
@@ -17,14 +18,15 @@ function useAudioUnlock(): void {
   }, []);
 }
 
-/** One shared ring for however many calls are ringing; it ends with the last of them. */
-export function useRingtone(lines: readonly Line[], enabled: boolean): void {
+/**
+ * The one tone the phone makes: the incoming ring, or ringback for an outbound call nobody has answered.
+ * It ends with the call that asked for it, and on unmount.
+ */
+export function useRingtone(lines: readonly Line[], prefs: TonePrefs, locale: string): void {
   useAudioUnlock();
-  const ringing = lines.some(isIncomingRing);
-  const shouldRing = enabled && ringing;
+  const tone = chooseTone(lines, prefs, locale);
   useEffect(() => {
-    if (shouldRing) startRing();
-    else stopRing();
-    return stopRing;
-  }, [shouldRing]);
+    if (tone !== null) startTone(tone);
+    return stopTone;
+  }, [tone]);
 }

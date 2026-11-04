@@ -482,6 +482,11 @@ function telephoneEventType(rtpmap: Readonly<Record<number, string>>): number | 
   return found === undefined ? undefined : Number(found[0]);
 }
 
+function samePlan(a: MediaPlan | undefined, b: MediaPlan): boolean {
+  if (a === undefined) return false;
+  return a.host === b.host && a.port === b.port && a.payloadType === b.payloadType && a.dtmfPayloadType === b.dtmfPayloadType;
+}
+
 function planOf(description: SessionDescription, payloadType: number): MediaPlan | undefined {
   const { port, rtpmap } = description.audio;
   if (port === 0) return undefined;
@@ -888,15 +893,16 @@ export class SipEngine {
 
   private onInviteResponse(dialog: Dialog, response: SipResponse): void {
     dialog.pending?.stop();
-    if (response.status < 200) return this.onProvisional(dialog, response.status);
+    if (response.status < 200) return this.onProvisional(dialog, response);
     if (response.status < 300) return this.onAnswered(dialog, response);
     this.onInviteRejected(dialog, response);
   }
 
   /** A repeated 100 must not drag "ringing" or "waiting" back to "trying". */
-  private onProvisional(dialog: Dialog, status: number): void {
-    const progress = PROGRESS_BY_STATUS[status];
+  private onProvisional(dialog: Dialog, response: SipResponse): void {
+    const progress = PROGRESS_BY_STATUS[response.status];
     if (progress === undefined) return;
+    if (response.body !== '') this.hearEarlyMedia(dialog, response.body);
     const trying = progress === PROGRESS_TRYING;
     if (trying && this.tracks.get(dialog.callId)?.progress !== undefined) return;
     this.setProgress(dialog.callId, progress);
@@ -978,7 +984,7 @@ export class SipEngine {
     this.sendAckTo(dialog, buildDialogRequest(dialog, 'ACK', cseq, this.deps.ids.newBranch()));
     const negotiated = negotiateBody(response.body);
     if (dialog.cancelled || negotiated === undefined) return this.endAnswered(dialog);
-    dialog.plan = negotiated.plan;
+    this.replacePlan(dialog, negotiated.plan);
     dialog.stage = 'confirmed';
     if (!this.dispatchCall(dialog.callId, { type: 'connected' })) return;
     this.setProgress(dialog.callId, PROGRESS_CONNECTING);
@@ -1015,6 +1021,7 @@ export class SipEngine {
   private async cancel(dialog: Dialog): Promise<void> {
     dialog.cancelled = true;
     this.stopSetupGuard(dialog);
+    this.stopMedia(dialog);
     const request = dialog.pending?.request;
     dialog.pending?.stop();
     if (request === undefined) return void this.dialogs.delete(dialog.callId);
@@ -1041,9 +1048,11 @@ export class SipEngine {
 
   /* -------------------------------------------------------------- media */
 
-  private startMedia(dialog: Dialog): void {
+  /** Opens the stream if there is a plan and none is running yet; true when one is running afterwards. */
+  private openMedia(dialog: Dialog): boolean {
     const { plan } = dialog;
-    if (plan === undefined || dialog.media !== undefined) return;
+    if (plan === undefined) return false;
+    if (dialog.media !== undefined) return true;
     try {
       const session = this.deps.rtp.create(sessionOptions(dialog.rtpPort, plan));
       const stopPlayback = session.onPcm((frame) => {
@@ -1051,12 +1060,41 @@ export class SipEngine {
       });
       this.deps.media.start(dialog.callId);
       dialog.media = { session, stopPlayback };
-      this.applyMute(dialog);
-      this.setProgress(dialog.callId, PROGRESS_ACTIVE);
+      return true;
     } catch (error) {
       log('warn', `media for ${dialog.callId} not started: ${String(error)}`);
+      return false;
+    }
+  }
+
+  /** The call is answered: keep a stream that early media already opened, or open it now, and go active. */
+  private startMedia(dialog: Dialog): void {
+    if (dialog.plan === undefined) return;
+    if (this.openMedia(dialog)) {
+      this.applyMute(dialog);
+      this.setProgress(dialog.callId, PROGRESS_ACTIVE);
     }
     this.emit();
+  }
+
+  /**
+   * A provisional response with an answer (RFC 3960): the network is sending audio before anyone picks up,
+   * a ringback tone or an announcement. The same stream carries on after the 200 OK, so it is not torn down.
+   */
+  private hearEarlyMedia(dialog: Dialog, body: string): void {
+    const negotiated = negotiateBody(body);
+    if (negotiated === undefined || dialog.cancelled) return;
+    this.replacePlan(dialog, negotiated.plan);
+    if (this.openMedia(dialog)) this.applyMute(dialog);
+    this.emit();
+  }
+
+  /** Adopts a plan; a stream already running for a different one is closed, one for the same plan is kept. */
+  private replacePlan(dialog: Dialog, plan: MediaPlan): boolean {
+    const changed = dialog.media !== undefined && !samePlan(dialog.plan, plan);
+    dialog.plan = plan;
+    if (changed) this.stopMedia(dialog);
+    return changed;
   }
 
   private stopMedia(dialog: Dialog): void {
@@ -1070,23 +1108,15 @@ export class SipEngine {
 
   /** Hold keeps the stream alive but silent; the user's own mute state is reported separately. */
   private applyMute(dialog: Dialog): void {
-    dialog.media?.session.setMuted(dialog.muted || dialog.held);
+    dialog.media?.session.setMuted(dialog.muted || dialog.held || dialog.stage === 'early');
     dialog.media?.session.setHeld(dialog.held);
   }
 
   /** The peer moved its media (or we learned it late): restart the session on the same local port. */
   private adoptMedia(dialog: Dialog, body: string): void {
     const negotiated = negotiateBody(body);
-    const { plan, media } = dialog;
-    if (negotiated === undefined || plan === undefined || media === undefined) return;
-    const moved = negotiated.plan.host !== plan.host || negotiated.plan.port !== plan.port;
-    dialog.plan = negotiated.plan;
-    if (!moved) return;
-    media.stopPlayback();
-    media.session.close();
-    dialog.media = undefined;
-    this.deps.media.stop(dialog.callId);
-    this.startMedia(dialog);
+    if (negotiated === undefined || dialog.plan === undefined || dialog.media === undefined) return;
+    if (this.replacePlan(dialog, negotiated.plan)) this.startMedia(dialog);
   }
 
   private sdpFor(dialog: Dialog, direction: SdpDirection): string {
