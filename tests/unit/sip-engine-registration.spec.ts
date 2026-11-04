@@ -594,6 +594,60 @@ describe('keepalive and dead-flow detection', () => {
   });
 });
 
+describe('an outbound INVITE in flight', () => {
+  const cancels = (r: Rig, index: number): SipRequest[] => r.links[index]?.requests('CANCEL') ?? [];
+  const via = (m: SipRequest | undefined): string | undefined => headerValue((m as SipRequest).headers, 'via');
+
+  /** The server answers the INVITE with a bare 100 Trying and then says nothing more: the call is mid-setup. */
+  async function ringingNowhere(): Promise<ScriptedRig> {
+    const r = rig('udp');
+    r.script.quiet = true;
+    r.script.invite = (m) => [reply(m, 100)];
+    await start(r);
+    await r.engine.dial('acc1', '1001');
+    await advance(50);
+    return r;
+  }
+
+  it('is not stranded by dead-flow replacement: the connection that carries it stays until the call is settled', async () => {
+    const r = await ringingNowhere();
+    await advance(85 * SECOND);
+    expect(keys(r)).not.toContain('logs.event.deadFlow');
+    expect(r.opens()).toBe(1);
+    expect(r.links[0]?.closed).toBe(false);
+    expect(r.engine.getCallViews()).toHaveLength(1);
+  });
+
+  it('keeps pinging while it waits, so a server that is only slow can still prove the flow alive', async () => {
+    const r = await ringingNowhere();
+    const before = r.links[0]?.keepalives ?? 0;
+    await advance(70 * SECOND);
+    expect(r.links[0]?.keepalives).toBeGreaterThan(before + 1);
+  });
+
+  it('replaces the connection after all once the setup guard has cancelled the call, CANCEL first', async () => {
+    const r = await ringingNowhere();
+    await advanceUntil(() => r.opens() === 2);
+    await advance(100);
+    expect(cancels(r, 0)).toHaveLength(1);
+    expect(keys(r)).toContain('logs.event.deadFlow');
+    expect(r.opens()).toBe(2);
+  });
+
+  it('cancels with the INVITE\'s own Via, branch and sent-by (RFC 3261 9.1), even after the connection changed', async () => {
+    const r = await ringingNowhere();
+    const invite = r.links[0]?.requests('INVITE')[0];
+    r.links[0]?.drop('ECONNRESET');
+    await advanceUntil(() => r.opens() === 2);
+    await advance(100);
+    const view = r.engine.getCallViews()[0];
+    await r.engine.hangup(view?.call.id as string);
+    expect(cancels(r, 0)).toHaveLength(0);
+    expect(cancels(r, 1)).toHaveLength(1);
+    expect(via(cancels(r, 1)[0])).toBe(via(invite));
+  });
+});
+
 describe('resumeAllEngines (the powerMonitor hook)', () => {
   it('wakes every live engine, and no longer a stopped one', async () => {
     const r = rig();

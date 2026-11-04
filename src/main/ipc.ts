@@ -23,8 +23,10 @@ import type { AccountId, AccountStoreState, SipAccount, SipAccountInput, Validat
 import { IPC, isDtmfDigit } from '../shared/api';
 import type { AccountDraft, AccountView, AppSnapshot, DialResult, MicAccess, SaveAccountResult } from '../shared/api';
 import { loadState, saveState } from './account-storage';
+import type { PersistedState } from './account-storage';
 import { createMediaBridge } from './media';
 import { SipEngine } from './sip/engine';
+import { initialUserAgentSetting, setUserAgent, userAgentSetting } from './sip/user-agent';
 import { electronMediaDeps, isMediaWebContents, log } from './windows';
 
 /** At most one snapshot per ~two animation frames, however many log lines or call events arrive. */
@@ -49,6 +51,8 @@ class Controller {
   store: AccountStoreState = emptyAccountStore;
   locale: Locale = resolveLocale(app.getLocale());
   history: readonly CallRecord[] = [];
+  /** Set only once the user has chosen a User-Agent; until then the environment variable (or the default) applies and nothing is written. */
+  userAgentChoice: string | undefined;
   private writing: Promise<void> = Promise.resolve();
   private cooling = false;
   private dirty = false;
@@ -76,6 +80,7 @@ class Controller {
       locale: this.locale,
       logs: this.diagnostics.entries(),
       debugLogging: this.diagnostics.debug,
+      userAgent: userAgentSetting(),
       history: this.history
     };
   }
@@ -118,7 +123,13 @@ class Controller {
   /** Writes are queued, so two changes in quick succession never interleave in the file. */
   persist(): Promise<void> {
     const write = this.writing.then(() =>
-      saveState({ accounts: this.store, locale: this.locale, debugLogging: this.diagnostics.debug, history: this.history })
+      saveState({
+        accounts: this.store,
+        locale: this.locale,
+        debugLogging: this.diagnostics.debug,
+        ...(this.userAgentChoice === undefined ? {} : { userAgent: this.userAgentChoice }),
+        history: this.history
+      })
     );
     this.writing = write.catch((error: unknown) => log('warn', `could not save state: ${String(error)}`));
     return write;
@@ -148,6 +159,15 @@ class Controller {
     await this.persist();
     this.broadcast();
     return this.diagnostics.debug;
+  }
+
+  /** Takes effect on the next message built; nothing is restarted. */
+  async changeUserAgent(value: string): Promise<string> {
+    const stored = setUserAgent(value);
+    this.userAgentChoice = stored;
+    await this.persist();
+    this.broadcast();
+    return stored;
   }
 
   clearLogs(): void {
@@ -299,6 +319,9 @@ function registerClipboardHandler(): void {
 
 function registerLogHandlers(controller: Controller): void {
   ipcMain.handle(IPC.setDebugLogging, (_event, enabled: unknown) => controller.setDebugLogging(enabled === true));
+  ipcMain.handle(IPC.setUserAgent, (_event, value: unknown): Promise<string> =>
+    typeof value === 'string' ? controller.changeUserAgent(value) : Promise.reject(new Error('invalid-argument'))
+  );
   ipcMain.handle(IPC.clearLogs, () => controller.clearLogs());
 }
 
@@ -339,13 +362,18 @@ function registerHandlers(controller: Controller): void {
   registerMicPermissionHandler();
 }
 
-export async function registerIpc(): Promise<void> {
-  const controller = new Controller();
-  const persisted = await loadState();
+function restore(controller: Controller, persisted: PersistedState): void {
   controller.store = persisted.accounts;
   if (persisted.locale !== undefined) controller.locale = persisted.locale;
   controller.diagnostics.setDebug(persisted.debugLogging === true);
+  controller.userAgentChoice = persisted.userAgent;
+  setUserAgent(persisted.userAgent ?? initialUserAgentSetting());
   controller.history = persisted.history ?? [];
+}
+
+export async function registerIpc(): Promise<void> {
+  const controller = new Controller();
+  restore(controller, await loadState());
   controller.seed();
   await controller.persist();
   controller.engine.onChange(() => controller.broadcast());

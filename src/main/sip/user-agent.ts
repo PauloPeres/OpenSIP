@@ -1,10 +1,20 @@
-export const DEFAULT_USER_AGENT = 'OpenSIPPhone/0.1.0';
+import { effectiveUserAgent, normaliseUserAgent, userAgentFromEnv } from '@core/sip';
 
-/** Diagnostic lever: OPENSIP_USER_AGENT replaces the User-Agent we send; blank or unset keeps the default. */
-export function resolveUserAgent(env: Readonly<Record<string, string | undefined>>): string {
-  const override = env['OPENSIP_USER_AGENT']?.trim();
-  return override === undefined || override === '' ? DEFAULT_USER_AGENT : override;
+/**
+ * The User-Agent every SIP message we build carries. Read at the moment a message is built, never captured,
+ * so a change in Settings applies to the next message with no restart.
+ */
+const state = { setting: userAgentFromEnv(process.env) };
+
+/** What the setting holds before the user has chosen one: the OPENSIP_USER_AGENT environment variable, or blank. */
+export const initialUserAgentSetting = (): string => userAgentFromEnv(process.env);
+
+/** Stores the setting (cleaned; blank means the default) and returns what was stored. */
+export function setUserAgent(value: string): string {
+  state.setting = normaliseUserAgent(value);
+  return state.setting;
 }
 
-/** Read once at startup; every SIP message we build takes its User-Agent from here. */
-export const USER_AGENT: string = resolveUserAgent(process.env);
+export const userAgentSetting = (): string => state.setting;
+
+export const currentUserAgent = (): string => effectiveUserAgent(state.setting);

@@ -202,24 +202,30 @@ const isKeepalive = (text: string): boolean => /^[\r\n]+$/.test(text);
 /** A ping is a keepalive of at least a double CRLF; a lone CRLF is the pong, which is never answered. */
 const isPing = (text: string): boolean => text.length >= PING.length && isKeepalive(text);
 
-/** Redacts first, then trims and makes control bytes visible, so no secret survives the cut. */
-function safePrefix(text: string): string {
-  return redactSipMessage(text)
+const hexEscape = (char: string): string => `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`;
+
+/**
+ * What an unreadable datagram looked like, for the log. One char per byte (latin1) so nothing is merged or
+ * lost, redacted before it is cut so no secret survives, then CR/LF become spaces and every other byte that
+ * is not printable ASCII is spelled out as `\xNN`: a NUL ping must read `\x00\x00\x00\x00`, not `....`.
+ */
+function safePrefix(data: Buffer): string {
+  return redactSipMessage(data.toString('latin1'))
     .slice(0, MALFORMED_PREFIX_CHARS)
-    .replace(/[^\x20-\x7e]/g, (char) => (char === '\r' || char === '\n' ? ' ' : '.'));
+    .replace(/[^\x20-\x7e]/g, (char) => (char === '\r' || char === '\n' ? ' ' : hexEscape(char)));
 }
 
-type Reporter = (text: string, bytes: number, source: string) => void;
+type Reporter = (data: Buffer, source: string) => void;
 
 function createMalformedReporter(onNotice: ConnectionDeps['onNotice']): Reporter {
   const state = { last: Number.NEGATIVE_INFINITY, skipped: 0 };
-  return (text, bytes, source) => {
+  return (data, source) => {
     const now = Date.now();
     if (onNotice === undefined || now - state.last < MALFORMED_REPORT_INTERVAL_MS) {
       state.skipped += 1;
       return;
     }
-    const params = { source, bytes: String(bytes), skipped: String(state.skipped), prefix: safePrefix(text) };
+    const params = { source, bytes: String(data.length), skipped: String(state.skipped), prefix: safePrefix(data) };
     state.last = now;
     state.skipped = 0;
     onNotice({ level: 'debug', messageKey: 'logs.event.datagramDropped', params });
@@ -233,7 +239,7 @@ function parseDatagram(data: Buffer, hub: Hub, report: Reporter, source: string,
   try {
     hub.emit(parse(text));
   } catch {
-    report(text, data.length, source);
+    report(data, source);
   }
 }
 

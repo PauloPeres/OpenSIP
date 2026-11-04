@@ -34,6 +34,7 @@ const api: OpenSipApi = {
   getLocale: () => ipcRenderer.invoke(IPC.getLocale),
   setLocale: (locale) => ipcRenderer.invoke(IPC.setLocale, locale),
   setDebugLogging: (enabled) => ipcRenderer.invoke(IPC.setDebugLogging, enabled),
+  setUserAgent: (value) => ipcRenderer.invoke(IPC.setUserAgent, value),
   clearLogs: () => ipcRenderer.invoke(IPC.clearLogs),
   clearHistory: () => ipcRenderer.invoke(IPC.clearHistory),
   removeHistoryEntry: (id) => ipcRenderer.invoke(IPC.removeHistoryEntry, id),

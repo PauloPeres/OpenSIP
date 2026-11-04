@@ -23,9 +23,8 @@ import type {
 } from '@core/sip';
 import type { SipConnection } from './connection';
 import type { IdFactory } from './ids';
-import { USER_AGENT } from './user-agent';
+import { currentUserAgent } from './user-agent';
 
-export { USER_AGENT };
 
 export interface RegistrarDeps {
   readonly connection: SipConnection;
@@ -118,7 +117,7 @@ function registerHeaders(params: RegisterParams, ids: IdFactory, cseq: number): 
     cseq: [`${cseq} REGISTER`],
     contact: [`<sip:${account.username}@${seen.host}:${seen.port};transport=${candidate.transport}>`],
     expires: [String(expires)],
-    'user-agent': [USER_AGENT],
+    'user-agent': [currentUserAgent()],
     allow: [ALLOW]
   };
 }
@@ -147,7 +146,7 @@ export function buildOptionsRequest(params: RegisterParams, ids: IdFactory, cseq
     to: [`<sip:${account.domain}>`],
     'call-id': [ids.newCallId(local.host)],
     cseq: [`${cseq} OPTIONS`],
-    'user-agent': [USER_AGENT]
+    'user-agent': [currentUserAgent()]
   };
   return { kind: 'request', method: 'OPTIONS', uri: `sip:${account.domain}`, headers, body: '' };
 }

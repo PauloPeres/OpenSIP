@@ -79,3 +79,22 @@ describe('history persistence', () => {
     expect(JSON.parse(await readFile(file(), 'utf8')).history).toEqual([]);
   });
 });
+
+describe('User-Agent persistence', () => {
+  it('round-trips the setting, including an explicit blank', async () => {
+    await saveState({ accounts: emptyAccountStore, userAgent: 'Z 5.6.16' });
+    expect((await loadState()).userAgent).toBe('Z 5.6.16');
+    await saveState({ accounts: emptyAccountStore, userAgent: '' });
+    expect((await loadState()).userAgent).toBe('');
+  });
+
+  it('reads as absent from a file written before the setting existed, so the environment can still seed it', async () => {
+    await writeFile(file(), JSON.stringify({ accounts: {}, locale: 'en' }));
+    expect((await loadState()).userAgent).toBeUndefined();
+  });
+
+  it('ignores a stored value that is not a string', async () => {
+    await writeFile(file(), JSON.stringify({ accounts: {}, userAgent: 42 }));
+    expect((await loadState()).userAgent).toBeUndefined();
+  });
+});

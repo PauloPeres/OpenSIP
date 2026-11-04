@@ -77,8 +77,20 @@ export const noteMedia = (state: KeepaliveState, mediaPackets: number, now: numb
   lastInboundAt: mediaPackets > state.mediaPackets ? now : state.lastInboundAt
 });
 
-/** Dead outranks ping: there is no point pinging a flow we have already given up on. */
-export function decideKeepalive(state: KeepaliveState, now: number, policy: KeepalivePolicy): KeepaliveAction {
-  if (now - state.lastInboundAt >= policy.deadAfterMs) return 'dead';
+/**
+ * Dead outranks ping: there is no point pinging a flow we have already given up on.
+ *
+ * `holdDead` is for a flow that carries a transaction which cannot be moved to another connection (an
+ * outbound INVITE still waiting for its final response: its responses are addressed to this flow's Via).
+ * Replacing the flow would strand that transaction, so the verdict is postponed: the flow keeps being pinged
+ * and silence is not acted on. The caller owns the end of the wait (the call's own setup timer).
+ */
+export function decideKeepalive(
+  state: KeepaliveState,
+  now: number,
+  policy: KeepalivePolicy,
+  holdDead = false
+): KeepaliveAction {
+  if (now - state.lastInboundAt >= policy.deadAfterMs && !holdDead) return 'dead';
   return now - state.lastSentAt >= policy.pingIntervalMs ? 'ping' : 'none';
 }

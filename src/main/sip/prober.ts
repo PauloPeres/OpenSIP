@@ -13,7 +13,7 @@ import {
   srvQueryNames
 } from '@core/sip';
 import type { ProbeOutcome, SrvRecord, TransportCandidate } from '@core/sip';
-import { USER_AGENT } from './user-agent';
+import { currentUserAgent } from './user-agent';
 
 export interface ProbeDeps {
   resolveSrv(
@@ -173,14 +173,12 @@ export function buildOptionsProbe(host: string, localPort: number, branch: strin
     `To: <sip:${host}>`,
     `Call-ID: ${branch}@opensip.invalid`,
     'CSeq: 1 OPTIONS',
-    `User-Agent: ${PROBE_USER_AGENT}`,
+    `User-Agent: ${currentUserAgent()}`,
     'Content-Length: 0',
     '',
     ''
   ].join('\r\n');
 }
-
-export const PROBE_USER_AGENT = USER_AGENT;
 
 const probeBranch = (): string => `z9hG4bK${randomBytes(6).toString('hex')}`;
 

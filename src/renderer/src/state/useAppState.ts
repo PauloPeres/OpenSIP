@@ -24,6 +24,7 @@ export interface AppActions {
   readonly dtmf: (callId: string, digit: DtmfDigit) => Promise<void>;
   readonly mute: (callId: string, muted: boolean) => Promise<void>;
   readonly setDebug: (enabled: boolean) => Promise<boolean>;
+  readonly setUserAgent: (value: string) => Promise<string>;
   readonly clearLogs: () => Promise<void>;
   readonly clearHistory: () => Promise<void>;
   readonly removeHistoryEntry: (id: string) => Promise<void>;
@@ -34,6 +35,10 @@ export interface AppState {
   readonly update: UpdateStatus;
   readonly failed: boolean;
   readonly actions: AppActions;
+}
+
+function settingsActions(api: OpenSipApi): Pick<AppActions, 'setDebug' | 'setUserAgent'> {
+  return { setDebug: (enabled) => api.setDebugLogging(enabled), setUserAgent: (value) => api.setUserAgent(value) };
 }
 
 function buildActions(): AppActions {
@@ -50,7 +55,7 @@ function buildActions(): AppActions {
     dial: (accountId, target) => api.dial(accountId, target),
     dtmf: (id, digit) => api.sendDtmf(id, digit),
     mute: (id, muted) => api.setMuted(id, muted),
-    setDebug: (enabled) => api.setDebugLogging(enabled),
+    ...settingsActions(api),
     clearLogs: () => api.clearLogs(),
     clearHistory: () => api.clearHistory(),
     removeHistoryEntry: (id) => api.removeHistoryEntry(id)

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NoReachableTransportError } from '../../src/core/sip/transport';
 import type { TransportCandidate } from '../../src/core/sip/transport';
-import { PROBE_USER_AGENT, buildOptionsProbe, buildUpgradeRequest, discoverTransport, expectedAccept, isSipUpgrade } from '../../src/main/sip/prober';
+import { buildOptionsProbe, buildUpgradeRequest, discoverTransport, expectedAccept, isSipUpgrade } from '../../src/main/sip/prober';
 import type { ProbeDeps } from '../../src/main/sip/prober';
 
 type SrvAnswer = readonly { name: string; port: number; priority: number; weight: number }[];
@@ -226,6 +226,6 @@ describe('buildOptionsProbe (regression: a live Kamailio ignored a probe without
   });
 
   it('identifies itself', () => {
-    expect(probe()).toContain(`User-Agent: ${PROBE_USER_AGENT}`);
+    expect(probe()).toContain('User-Agent: OpenSIPPhone/0.1.0');
   });
 });

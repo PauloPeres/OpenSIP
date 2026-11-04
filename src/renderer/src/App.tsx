@@ -89,7 +89,7 @@ function ViewContent({ view, state, model, now, setupStarts, ringtone, onRediale
   if (view === 'history') return <HistoryPanel snapshot={state.snapshot} actions={state.actions} onDialed={onRedialed} />;
   if (view === 'accounts') return <AccountsView state={state} />;
   if (view === 'logs') return <LogsPanel snapshot={state.snapshot} actions={state.actions} />;
-  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} />;
+  if (view === 'settings') return <SettingsPanel update={state.update} ringtone={ringtone} userAgent={{ value: state.snapshot.userAgent, save: state.actions.setUserAgent }} />;
   return <PhoneView state={state} model={model} now={now} setupStarts={setupStarts} />;
 }
 

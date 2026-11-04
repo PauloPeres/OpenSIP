@@ -10,3 +10,4 @@ export * from './digest';
 export * from './bindings';
 export * from './retry';
 export * from './keepalive';
+export * from './user-agent';

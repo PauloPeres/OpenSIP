@@ -30,6 +30,8 @@ export interface PersistedState {
   readonly locale?: Locale;
   /** Raw SIP capture; persisted so a diagnosis survives a restart. */
   readonly debugLogging?: boolean;
+  /** The User-Agent setting; blank means the default. Absent until the user has chosen, so the environment can seed it. */
+  readonly userAgent?: string;
   /** Newest first. Absent in files written before history existed. */
   readonly history?: readonly CallRecord[];
 }
@@ -45,6 +47,7 @@ interface StoredFile {
   readonly accounts?: Readonly<Record<string, StoredAccount>>;
   readonly locale?: string;
   readonly debugLogging?: boolean;
+  readonly userAgent?: unknown;
   readonly history?: unknown;
 }
 
@@ -76,7 +79,8 @@ function toPersisted(file: StoredFile): PersistedState {
   const accounts = file.accounts ? decodeAll(file.accounts) : emptyAccountStore;
   const locale = file.locale !== undefined && isSupportedLocale(file.locale) ? { locale: file.locale } : {};
   const debugLogging = typeof file.debugLogging === 'boolean' ? { debugLogging: file.debugLogging } : {};
-  return { accounts, ...locale, ...debugLogging, history: parseHistory(file.history) };
+  const userAgent = typeof file.userAgent === 'string' ? { userAgent: file.userAgent } : {};
+  return { accounts, ...locale, ...debugLogging, ...userAgent, history: parseHistory(file.history) };
 }
 
 export async function loadState(): Promise<PersistedState> {
@@ -97,6 +101,7 @@ export async function saveState(state: PersistedState): Promise<void> {
     accounts,
     ...(state.locale === undefined ? {} : { locale: state.locale }),
     ...(state.debugLogging === undefined ? {} : { debugLogging: state.debugLogging }),
+    ...(state.userAgent === undefined ? {} : { userAgent: state.userAgent }),
     history: state.history ?? []
   };
   await mkdir(dirname(filePath()), { recursive: true });

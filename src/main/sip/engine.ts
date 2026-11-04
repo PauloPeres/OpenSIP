@@ -82,12 +82,12 @@ import { defaultIdFactory } from './ids';
 import type { IdFactory } from './ids';
 import { createProbeDeps, discoverTransport } from './prober';
 import type { ProbeDeps } from './prober';
+import { currentUserAgent } from './user-agent';
 import {
   MAX_AUTH_ATTEMPTS,
   TIMER_T1_MS,
   UDP_MAX_TRANSMISSIONS,
   UDP_TRANSACTION_TIMEOUT_MS,
-  USER_AGENT,
   buildOptionsRequest,
   credentialsFor,
   learnPublicAddress,
@@ -369,7 +369,7 @@ function buildReply(
     to: [withTag(first(request.headers, 'to'), options.toTag)],
     'call-id': [first(request.headers, 'call-id')],
     cseq: [first(request.headers, 'cseq')],
-    'user-agent': [USER_AGENT],
+    'user-agent': [currentUserAgent()],
     allow: [ALLOW],
     ...(options.contact === undefined ? {} : { contact: [options.contact] }),
     ...(options.body === undefined ? {} : { 'content-type': ['application/sdp'] })
@@ -412,7 +412,7 @@ function requestHeaders(parts: RequestParts): SipHeaders {
     'call-id': [parts.callId],
     cseq: [parts.cseq],
     contact: [contactFor(parts.entry, connection)],
-    'user-agent': [USER_AGENT]
+    'user-agent': [currentUserAgent()]
   };
 }
 
@@ -450,7 +450,12 @@ function buildInvite(dialog: InviteParty, cseq: number, branch: string, body: st
 const pick = (headers: SipHeaders, names: readonly string[]): SipHeaders =>
   Object.fromEntries(names.map((name) => [name, headerValues(headers, name)] as const).filter(([, values]) => values.length > 0));
 
-/** CANCEL repeats the INVITE's Via (same branch), URI, From, To and Call-ID (RFC 3261 9.1). */
+/**
+ * CANCEL repeats the INVITE's Via (same branch), URI, From, To and Call-ID (RFC 3261 9.1). The Via is copied
+ * untouched even when the connection has changed since: a server matches a CANCEL to its INVITE transaction
+ * by top-Via branch, sent-by and method (17.2.3), never by the packet's source address, so the original Via
+ * is exactly what makes it match. Rewriting the sent-by to the new socket would break the match.
+ */
 function buildCancel(invite: SipRequest): SipRequest {
   const cseq = `${Number.parseInt(first(invite.headers, 'cseq'), 10)} CANCEL`;
   const headers = withHeader(pick(invite.headers, ['via', 'max-forwards', 'from', 'to', 'call-id', 'user-agent']), 'cseq', cseq);
@@ -1334,9 +1339,18 @@ export class SipEngine {
     if (keepalive === undefined || connection === undefined) return;
     const now = this.deps.now();
     keepalive.state = noteMedia(keepalive.state, this.mediaPackets(entry), now);
-    const action = decideKeepalive(keepalive.state, now, keepalivePolicy(connection.candidate.transport));
+    const action = decideKeepalive(keepalive.state, now, keepalivePolicy(connection.candidate.transport), this.hasPendingInvite(entry));
     if (action === 'ping') this.ping(entry, connection, keepalive);
     else if (action === 'dead') this.declareDead(entry);
+  }
+
+  /**
+   * An outbound INVITE with no final response yet. Its responses are routed to the Via it went out with, which
+   * names this connection's socket, so swapping the connection would orphan the call (the answer would go to
+   * a closed port). Dead-flow replacement waits for it; the setup guard bounds the wait at CALL_SETUP_TIMEOUT_MS.
+   */
+  private hasPendingInvite(entry: Entry): boolean {
+    return [...this.dialogs.values()].some((d) => d.entry === entry && d.role === 'uac' && d.stage === 'early' && !d.cancelled);
   }
 
   private ping(entry: Entry, connection: SipConnection, keepalive: Keepalive): void {

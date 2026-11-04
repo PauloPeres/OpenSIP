@@ -28,6 +28,7 @@ export const IPC = {
   getLocale: 'opensip:locale:get',
   setLocale: 'opensip:locale:set',
   setDebugLogging: 'opensip:logs:debug',
+  setUserAgent: 'opensip:settings:user-agent',
   clearLogs: 'opensip:logs:clear',
   clearHistory: 'opensip:history:clear',
   removeHistoryEntry: 'opensip:history:remove',
@@ -86,6 +87,7 @@ export interface AccountSharing {
  * the shared layer; it is re-exported here, which is where the processes read it.
  */
 export { MAX_HISTORY_ENTRIES } from '@core/history';
+export { DEFAULT_USER_AGENT, MAX_USER_AGENT_LENGTH } from '@core/sip';
 export type { CallOutcome, CallRecord } from '@core/history';
 
 export interface AppSnapshot {
@@ -95,6 +97,8 @@ export interface AppSnapshot {
   /** Oldest first, capped at DEFAULT_LOG_CAPACITY entries. */
   readonly logs: readonly LogEntry[];
   readonly debugLogging: boolean;
+  /** The User-Agent setting as stored; blank means the default is in use. */
+  readonly userAgent: string;
   /** Finished calls, newest first, capped at MAX_HISTORY_ENTRIES. */
   readonly history: readonly CallRecord[];
 }
@@ -156,6 +160,8 @@ export interface OpenSipApi {
   setLocale(locale: Locale): Promise<Locale>;
   /** Turns raw SIP message capture on or off; returns the resulting state. */
   setDebugLogging(enabled: boolean): Promise<boolean>;
+  /** Sets the SIP User-Agent (blank restores the default); returns the cleaned value stored. Applies to the next message sent. */
+  setUserAgent(value: string): Promise<string>;
   clearLogs(): Promise<void>;
   clearHistory(): Promise<void>;
   removeHistoryEntry(id: string): Promise<void>;

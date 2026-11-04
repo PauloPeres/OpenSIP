@@ -2,6 +2,8 @@ import { SUPPORTED_LOCALES } from '@core/i18n';
 import type { Locale } from '@core/i18n';
 import type { UpdateStatus } from '../../../shared/api';
 import { PermissionsSection } from './PermissionsSection';
+import { UserAgentField } from './UserAgentField';
+import type { UserAgentPref } from './UserAgentField';
 import { SelectField, Switch } from './ui/Field';
 import { Segmented } from './ui/Segmented';
 import { THEMES, isTheme, useTheme } from '../state/theme';
@@ -55,7 +57,11 @@ export interface RingtonePref {
   readonly set: (next: boolean) => void;
 }
 
-export function SettingsPanel({ update, ringtone }: { readonly update: UpdateStatus; readonly ringtone: RingtonePref }): JSX.Element {
+export function SettingsPanel({ update, ringtone, userAgent }: {
+  readonly update: UpdateStatus;
+  readonly ringtone: RingtonePref;
+  readonly userAgent: UserAgentPref;
+}): JSX.Element {
   const { t } = useTranslation();
   const permissions = usePermissions();
   return (
@@ -63,6 +69,7 @@ export function SettingsPanel({ update, ringtone }: { readonly update: UpdateSta
       <LanguageSelect />
       <ThemeSelect />
       <Switch id="ringtone" label={t('settings.ringtone')} hint={t('settings.ringtone.hint')} checked={ringtone.enabled} onChange={ringtone.set} />
+      <UserAgentField pref={userAgent} />
       <PermissionsSection model={permissions} />
       <p className="muted" role="status">
         {updateText(t, update)}

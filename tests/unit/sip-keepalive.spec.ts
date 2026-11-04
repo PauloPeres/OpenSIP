@@ -117,6 +117,20 @@ describe('noteMedia: RTP packets that keep arriving are proof the network is up'
   });
 });
 
+describe('decideKeepalive with the verdict held', () => {
+  const state = { lastSentAt: 0, lastInboundAt: 0, mediaPackets: 0 };
+
+  it('does not declare a silent flow dead, and keeps pinging it on schedule', () => {
+    expect(decideKeepalive(state, 600_000, POLICY, true)).toBe('ping');
+    expect(decideKeepalive({ ...state, lastSentAt: 599_000 }, 600_000, POLICY, true)).toBe('none');
+  });
+
+  it('changes nothing for a flow that is not silent, and the default is not to hold', () => {
+    expect(decideKeepalive({ ...state, lastInboundAt: 595_000 }, 600_000, POLICY, true)).toBe('ping');
+    expect(decideKeepalive(state, 600_000, POLICY)).toBe('dead');
+  });
+});
+
 describe('CRLF keepalive framing', () => {
   it('is skipped by the stream framer, leading or between messages', () => {
     const message = 'OPTIONS sip:a SIP/2.0\r\nCall-ID: 1\r\nContent-Length: 0\r\n\r\n';
